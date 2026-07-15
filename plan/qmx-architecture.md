@@ -13,7 +13,7 @@ sqlite store → search). They differ mostly in *what* is indexed and *which* qu
 ```mermaid
 flowchart TB
   subgraph SRC["Sources"]
-    C["Code repos<br/>(xtorch + 7 others)"]
+    C["Code repos<br/>(your local repos)"]
     B["Chat backfill<br/>~/.claude/projects/*.jsonl"]
     H["Live capture<br/>Claude Code <b>Stop hook</b>"]
   end
@@ -85,7 +85,7 @@ flowchart LR
 
 | Capability | Indexed content | Ingest path | Query path | Answers |
 |---|---|---|---|---|
-| **1 · Code search** | code chunks (`kind=code`) | tree-sitter → embed → vec+FTS | vector+BM25 → RRF → rerank | "where's the launcher logic" → `xtorch.py:591` |
+| **1 · Code search** | code chunks (`kind=code`) | tree-sitter → embed → vec+FTS | vector+BM25 → RRF → rerank | "where's the retry logic" → `client.py:142` |
 | **2 · Memory recall** | chat turns (`kind=chat`) | jsonl/live → clean → embed → vec+FTS | vector+BM25, `kind=chat`, expand hit → surrounding turns | "when did we discuss local embeddings, and the conclusion?" → the turns + the decision |
 | **3 · Learnings** | distilled notes (`kind=learning`) | **consolidation loop**: Qwen reads recent chats → extracts decisions/mistakes/how-to → dedups/updates → stores | vector over `kind=learning` | "how should I raise a gcp-infra IAM PR" → "project-level, ask in #platform-security-support (learned 2026-07)" |
 

@@ -20,14 +20,14 @@
 
 qmx indexes two domains into **one** index, tagged so queries can scope to either or both:
 
-1. **Code** — the repos under `/Users/YZ0315/GitHub/...` (starting with the `xtorch` workspace's 8
-   repos). AST-aware chunking via tree-sitter.
+1. **Code** — your local source repos (a multi-repo workspace to start with). AST-aware chunking via
+   tree-sitter.
 2. **Chats** — Claude Code conversation history:
    - **Backfill:** the ~86 existing `~/.claude/projects/*/*.jsonl` transcripts (one-time import).
    - **On-the-fly:** a Claude Code **Stop hook** captures each new turn live and indexes it.
 
 Every indexed document carries `kind` (`code` | `doc` | `chat`), `repo`/`project`, and `path` so a
-query can target "xtorch code", "all chats", "this project's chats", etc.
+query can target "repo X's code", "all chats", "this project's chats", etc.
 
 ## Architecture
 
@@ -150,7 +150,7 @@ door); the Stop hook is the *write* door.
 | Phase | Deliverable | Acceptance |
 |---|---|---|
 | **0** | `store.py` schema + migrations; `config.py`; `embed.py` Ollama client | round-trip: embed 3 strings, store, cosine top-k returns them |
-| **1** | Code vertical slice: `chunk/code.py` + `index.py` + `search.py` + `qmx query` | index `xtorch`; "where's the launcher logic" returns `xtorch.py:591`/`:772` in top-5 |
+| **1** | Code vertical slice: `chunk/code.py` + `index.py` + `search.py` + `qmx query` | index a local repo; a known function is returned in top-5 for a by-meaning query |
 | **2** | **Robustness core**: incremental reindex, dedup, tombstones, `watch.py` | edit 1 file → only its chunks re-embed; delete file → chunks gone; unchanged run = ~0 embeds |
 | **3** | Qwen3-Reranker stage + resident `mcp_server.py` + Claude Code wiring | MCP `query` callable from Claude Code; rerank improves top-5 ordering |
 | **4** | **Chats**: `chunk/chat.py`, `qmx backfill-chats`, Stop-hook `capture.py` | 86 transcripts searchable; a new turn is queryable within seconds |
