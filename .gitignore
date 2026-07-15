@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.eggs/
+build/
+dist/
+
+# uv
+.uv/
+
+# qmx local artifacts (index is a rebuildable shadow — never commit it)
+*.db
+*.db-wal
+*.db-shm
+.qmx/
+index/
+models/
+chat-md/
+
+# Secrets / env
+.env
+.env.*
+*.token.json
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
