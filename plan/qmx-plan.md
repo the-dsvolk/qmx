@@ -1,0 +1,173 @@
+# qmx — Implementation Plan
+
+**qmx = Query Memory indeX** — local, private, Qwen-powered semantic search over **code *and* chats**.
+
+## Decision record
+
+- **Approach:** from-scratch **Python 3.12 / `uv`**, clean-room (not a qmd fork). Derived conceptually
+  from `tobi/qmd` (MIT); no TS carried over.
+- **Model hosting:** **Ollama** serves all models over `localhost:11434`. qmx is a thin HTTP client —
+  no in-process model loading, no torch dependency.
+- **Models — Qwen only** (one Apache-2.0 family):
+  - `qwen3-embedding` — embeddings (vector search)
+  - `qwen3-reranker` — final-stage reranking
+  - a Qwen chat model (e.g. `qwen3` instruct) — chat-turn summarization
+- **Interface:** a **resident MCP server** (pay startup once) + a thin CLI for indexing/admin.
+- **Store:** SQLite + `sqlite-vec` (vectors) + FTS5 (BM25). Files on disk are the source of truth;
+  the DB is a **rebuildable shadow index**.
+
+## Scope: code AND chats are both first-class
+
+qmx indexes two domains into **one** index, tagged so queries can scope to either or both:
+
+1. **Code** — the repos under `/Users/YZ0315/GitHub/...` (starting with the `xtorch` workspace's 8
+   repos). AST-aware chunking via tree-sitter.
+2. **Chats** — Claude Code conversation history:
+   - **Backfill:** the ~86 existing `~/.claude/projects/*/*.jsonl` transcripts (one-time import).
+   - **On-the-fly:** a Claude Code **Stop hook** captures each new turn live and indexes it.
+
+Every indexed document carries `kind` (`code` | `doc` | `chat`), `repo`/`project`, and `path` so a
+query can target "xtorch code", "all chats", "this project's chats", etc.
+
+## Architecture
+
+```
+                         ┌──────────────────────── qmx (Python, resident) ─────────────────────────┐
+  code repos ─┐          │  ingest → chunk → embed(HTTP) → store → search → serve                   │
+  chat .md  ──┼──watch──▶│                                                                          │
+  Stop hook ──┘          │  chunk/   tree-sitter (code) · md-aware (docs) · jsonl→turn (chats)      │
+                         │  embed/   Ollama HTTP client (batched, retried)                          │
+                         │  store/   sqlite-vec + FTS5 + hash tables (incremental, dedup)           │
+                         │  search/  vector + BM25 → RRF → Qwen3-Reranker                            │
+                         │  index/   walk → hash → diff → upsert/tombstone   ← robustness core       │
+                         │  capture/ Stop-hook: turn → clean → daily .md → enqueue index            │
+                         │  mcp/     resident server: query / get / status                          │
+                         └──────────────────────────────────┬───────────────────────────────────────┘
+                                                             │ HTTP :11434
+                                        ┌────────────────────▼─────────────────────┐
+                                        │ Ollama:  qwen3-embedding · qwen3-reranker  │
+                                        │          qwen3 (summarize)   (Metal/M4)    │
+                                        └────────────────────────────────────────────┘
+```
+
+### Package layout
+
+```
+src/qmx/
+  __init__.py
+  config.py        # paths, model names, globs, Ollama URL — from env/TOML
+  chunk/
+    code.py        # tree-sitter AST chunking (py/ts/go/rust + regex fallback)
+    doc.py         # markdown header/code-fence aware
+    chat.py        # jsonl → clean turns → chunks (drops tool payloads/system-reminders)
+  embed.py         # Ollama /api/embeddings client: batching, retry/backoff, timeouts
+  store.py         # sqlite-vec + FTS5 schema, upsert/delete, hash tables, migrations
+  search.py        # vector + BM25 → RRF → optional Qwen3-Reranker
+  index.py         # walk sources, hash-diff, incremental reindex, tombstones
+  watch.py         # filesystem watcher for code dirs + chat-md dir
+  capture.py       # Stop-hook entrypoint (turn → daily md → enqueue)
+  mcp_server.py    # resident MCP server (query/get/status tools)
+  cli.py           # `qmx index|query|watch|serve|backfill-chats|status`
+tests/
+plan/              # this doc
+```
+
+## Store schema (sketch)
+
+- `documents(doc_id, kind, repo, path, mtime, file_hash, ...)` — one row per source file/session.
+- `chunks(chunk_id, doc_id, ord, text, chunk_hash, start_line, end_line, symbol)` — dedup on `chunk_hash`.
+- `vec_chunks` — `sqlite-vec` virtual table mapping `chunk_id → embedding`.
+- `fts_chunks` — FTS5 over `chunks.text` for BM25.
+- `meta(schema_version, embed_model, embed_dim, ...)` — drives migrations + rebuild-on-mismatch.
+
+## Chat memory — detail
+
+- **Backfill (`qmx backfill-chats`):** parse each `~/.claude/projects/*/*.jsonl`; keep human/assistant
+  message text + concise tool *summaries*; drop raw tool payloads, `system-reminder`, queue/mode
+  events. Emit one markdown per session (`## user` / `## assistant`, `<!-- session:UUID -->` anchor)
+  into `~/.claude/chat-md/<project>/<date>.md`, then index.
+- **On-the-fly (Stop hook → `qmx capture`):** on each turn, read the last turn, clean it, append to
+  today's daily file with the session anchor, enqueue an incremental index of that one file. Local
+  Qwen embeddings keep this near-real-time.
+- **Memory tiers:**
+  - **Raw recall** — every turn indexed (full fidelity). Default.
+  - **Distilled (optional)** — nightly/lazy Qwen summaries + `PROJECT.md`/`USER.md`-style facts for
+    high-signal recall. Complements (does not replace) the existing `~/.claude/.../memory/` system.
+
+## Claude Code triggers (hooks) — how live capture fires
+
+On-the-fly chat capture is driven by **Claude Code hooks**, configured in `settings.json`
+(`hooks` block). The harness runs these commands on events and passes JSON on stdin
+(`session_id`, `transcript_path`, `cwd`, `hook_event_name`).
+
+- **`Stop`** (primary trigger) — fires when Claude finishes a turn. Command → `qmx capture`, which
+  reads `transcript_path` from stdin, extracts the just-completed turn(s), cleans them, appends to
+  the daily chat markdown with the session anchor, and enqueues an incremental index of that file.
+- **`SubagentStop`** (optional) — same, for subagent turns if we want them captured.
+- **`SessionStart`** (optional) — ensure the `qmx watch`/MCP server is up and the index is current.
+
+Config sketch (`~/.claude/settings.json`):
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "qmx capture" } ] }
+    ]
+  }
+}
+```
+
+`qmx capture` is intentionally cheap and non-blocking (enqueue-and-return) so it never slows a turn.
+Wiring is done in **Phase 4** via the `update-config` skill (hooks are harness-executed, not model
+behavior — they must live in `settings.json`). The MCP server is registered separately (the *read*
+door); the Stop hook is the *write* door.
+
+## Robustness core (the reason we chose the "robust" build)
+
+- **Incremental reindex:** per-file `file_hash` skips unchanged files entirely; changed files are
+  re-chunked and diffed at the **per-chunk hash** level → upsert only new/changed chunks.
+- **Dedup:** identical `chunk_hash` (even across files) embeds once.
+- **Deletes/renames:** files gone from source → their chunks tombstoned; rename = delete+add, dedup
+  keeps the embedding warm.
+- **Append-only chat files:** re-chunk the tail; hashing means only new turns embed.
+- **Resumable / crash-safe:** index in a transaction per file; never leave a half-written doc.
+- **Backend down:** Ollama unreachable → queue + exponential backoff; `qmx index` is idempotent and
+  resumable.
+- **Concurrency:** SQLite WAL, single writer, many readers (MCP query never blocks indexing).
+- **Excludes:** `.git`, `node_modules`, `dist/`, lockfiles, binaries, size cap; logged, not silently
+  skipped.
+
+## MCP + CLI surface
+
+- **MCP tools:** `query(text, kind?, repo?, k?)`, `get(chunk_id)` / expand-to-section, `status()`.
+- **CLI:** `qmx index <path...>`, `qmx backfill-chats`, `qmx watch`, `qmx serve` (MCP),
+  `qmx query "..."`, `qmx status`.
+- **Claude Code wiring:** MCP server entry in settings; Stop hook → `qmx capture`.
+
+## Phasing
+
+| Phase | Deliverable | Acceptance |
+|---|---|---|
+| **0** | `store.py` schema + migrations; `config.py`; `embed.py` Ollama client | round-trip: embed 3 strings, store, cosine top-k returns them |
+| **1** | Code vertical slice: `chunk/code.py` + `index.py` + `search.py` + `qmx query` | index `xtorch`; "where's the launcher logic" returns `xtorch.py:591`/`:772` in top-5 |
+| **2** | **Robustness core**: incremental reindex, dedup, tombstones, `watch.py` | edit 1 file → only its chunks re-embed; delete file → chunks gone; unchanged run = ~0 embeds |
+| **3** | Qwen3-Reranker stage + resident `mcp_server.py` + Claude Code wiring | MCP `query` callable from Claude Code; rerank improves top-5 ordering |
+| **4** | **Chats**: `chunk/chat.py`, `qmx backfill-chats`, Stop-hook `capture.py` | 86 transcripts searchable; a new turn is queryable within seconds |
+| **5** | Hardening: backend-down, concurrency, huge files, retries + benchmarks | kill Ollama mid-index → resumes cleanly; index+query concurrently; perf numbers recorded |
+
+## Open questions (decide as we hit them)
+
+1. Chat capture: index **raw** turns, **summarized**, or both? (plan: raw now, distilled later)
+2. Chat scope: this project only vs **all** `~/.claude/projects/*` (plan: all, tagged by project)
+3. Index location: `~/.qmx/index.db` (global, cross-repo) — assumed yes
+4. Exact Qwen sizes (0.6B vs 4B/8B embed; reranker size) — pick in Phase 0 by speed/quality on M4
+5. Relationship to `~/.claude/.../memory/`: keep curated layer + qmx as full-recall — assumed yes
+
+## References
+
+- qmd (origin, MIT): https://github.com/tobi/qmd
+- sqlite-vec: https://github.com/asg017/sqlite-vec
+- Ollama API: https://github.com/ollama/ollama/blob/main/docs/api.md
+- Qwen3 Embedding / Reranker: https://github.com/QwenLM
+- MCP Python SDK: https://github.com/modelcontextprotocol/python-sdk
