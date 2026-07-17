@@ -96,16 +96,18 @@ flowchart LR
 ```
 
 Choose where the backend lives with `QMX_OLLAMA_URL` and which model embeds with `embed_model`
-(see [QUICKSTART.md](./QUICKSTART.md)). Reranking is a seam after RRF — currently off (RRF-only);
-see [plan/qmx-ml-notes.md](./plan/qmx-ml-notes.md).
+(see [QUICKSTART.md](./QUICKSTART.md)). An optional **rerank** stage after RRF sharpens the top-k:
+set `rerank_url` to a cross-encoder server (**Qwen3-Reranker via llama.cpp `--reranking`** on the
+Spark GPU) — off by default, fails soft to RRF (see [plan/qmx-ml-notes.md](./plan/qmx-ml-notes.md)).
 
 ## Status
 
 Phase 4 (chats) landing: qmx now indexes your Claude Code **conversation history** alongside code —
 `qmx backfill-chats` for past transcripts and a `Stop` hook (`qmx capture`) for live turns, recalled
 via the `mcp__qmx__recall` tool. Built on the resident **MCP server** (Phase 3), tree-sitter
-chunking, incremental indexing, and hybrid **vector + BM25 → RRF** search. Reranking is deferred
-(RRF-only) — see [`plan/qmx-ml-notes.md`](./plan/qmx-ml-notes.md). See [`plan/`](./plan) for the design.
+chunking, incremental indexing, and hybrid **vector + BM25 → RRF** search — with an optional
+**Qwen3-Reranker** stage (llama.cpp on the Spark GPU; see
+[`plan/qmx-ml-notes.md`](./plan/qmx-ml-notes.md)). See [`plan/`](./plan) for the design.
 
 ## Development
 

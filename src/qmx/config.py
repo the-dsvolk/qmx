@@ -21,6 +21,7 @@ _ENV_MAP = {
     "QMX_OLLAMA_URL": "ollama_url",
     "QMX_DB_PATH": "db_path",
     "QMX_EMBED_MODEL": "embed_model",
+    "QMX_RERANK_URL": "rerank_url",
     "QMX_RERANK_MODEL": "rerank_model",
     "QMX_CHAT_MODEL": "chat_model",
     "QMX_MCP_HOST": "mcp_host",
@@ -53,6 +54,10 @@ class Settings:
     embed_model: str = "qwen3-embedding"
     rerank_model: str = "qwen3-reranker"
     chat_model: str = "qwen3"
+
+    # Reranker: base URL of a Cohere-style /v1/rerank server (llama.cpp llama-server --reranking).
+    # Empty = disabled (RRF-only). e.g. "http://spark-0e81.local:8081".
+    rerank_url: str = ""
 
     # Resident MCP server bind address (the Spark serves this on the LAN; clients use QMX_MCP_URL).
     mcp_host: str = "127.0.0.1"

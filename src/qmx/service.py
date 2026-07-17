@@ -11,6 +11,7 @@ import httpx
 
 from qmx.config import Settings
 from qmx.embed import Embedder, OllamaEmbedder
+from qmx.rerank import make_reranker
 from qmx.search import search
 from qmx.store import SearchHit, Store
 
@@ -23,6 +24,7 @@ class QmxService:
     def __init__(self, settings: Settings, embedder: Embedder | None = None) -> None:
         self._settings = settings
         self._embedder = embedder if embedder is not None else OllamaEmbedder(settings)
+        self._reranker = make_reranker(settings)  # None unless rerank_url is configured
 
     def _store(self) -> Store:
         return Store.open(
@@ -30,15 +32,15 @@ class QmxService:
         )
 
     def query(self, text: str, k: int = 5, kind: str | None = None) -> list[dict]:
-        """Hybrid (vector + BM25 -> RRF) search; returns ranked, JSON-friendly hits."""
+        """Hybrid (vector + BM25 -> RRF, optional rerank) search; JSON-friendly hits."""
         with self._store() as store:
-            results = search(store, self._embedder, text, k=k, kind=kind)
+            results = search(store, self._embedder, text, k=k, kind=kind, reranker=self._reranker)
             return [_hit_dict(r.hit, score=r.score) for r in results]
 
     def recall(self, text: str, k: int = 5) -> list[dict]:
         """Search **chat** memory only (``kind='chat'``) — past Claude Code conversation turns."""
         with self._store() as store:
-            results = search(store, self._embedder, text, k=k, kind="chat")
+            results = search(store, self._embedder, text, k=k, kind="chat", reranker=self._reranker)
             return [_hit_dict(r.hit, score=r.score) for r in results]
 
     def get(self, chunk_id: int) -> dict | None:

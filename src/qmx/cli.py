@@ -16,6 +16,7 @@ from qmx.capture import capture
 from qmx.config import Settings
 from qmx.embed import EmbedBackendError, OllamaEmbedder
 from qmx.index import backfill_chats, index_memory, index_paths
+from qmx.rerank import make_reranker
 from qmx.search import search
 from qmx.store import Store, StoreSchemaMismatch
 from qmx.watch import watch
@@ -208,9 +209,12 @@ def _cmd_serve(settings: Settings, args: argparse.Namespace) -> int:
 
 
 def _cmd_query(settings: Settings, args: argparse.Namespace) -> int:
+    reranker = make_reranker(settings)
     try:
         with _open_store(settings) as store, OllamaEmbedder(settings) as embedder:
-            results = search(store, embedder, args.text, k=args.k, kind=args.kind)
+            results = search(
+                store, embedder, args.text, k=args.k, kind=args.kind, reranker=reranker
+            )
     except (StoreSchemaMismatch, EmbedBackendError) as exc:
         print(f"query failed: {exc}", file=sys.stderr)
         return 1

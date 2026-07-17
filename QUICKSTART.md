@@ -46,6 +46,10 @@ embed_dim   = 1024                              # must match the model
 mcp_host    = "127.0.0.1"                       # local-only MCP server
 mcp_port    = 8765
 # db_path defaults to ~/.qmx/index.db
+
+# Optional cross-encoder rerank (sharpens top-k). Off if unset. Points at a llama.cpp
+# `llama-server --reranking` (Qwen3-Reranker) — see INFRA.md. Fails soft to RRF if down.
+# rerank_url = "http://spark-0e81.local:8081"
 ```
 
 Any field can be overridden per-command with a `QMX_*` env var (e.g. `QMX_OLLAMA_URL`,
