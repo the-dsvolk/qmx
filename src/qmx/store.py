@@ -238,6 +238,51 @@ class Store:
             self._conn.execute("DELETE FROM documents WHERE doc_id=?", (doc_id,))
         return self._count_orphans(candidate_ids)
 
+    def remove_source(self, path: str, kind: str = "code") -> tuple[int, int]:
+        """Remove the document at ``path`` and everything under ``path/``.
+
+        Handles both a single file and a whole directory subtree. Returns
+        ``(documents_removed, chunks_orphaned)``; run :meth:`purge_orphans` to reclaim space.
+        """
+        rows = self._conn.execute(
+            "SELECT doc_id FROM documents WHERE kind=? AND (path=? OR path LIKE ? ESCAPE '\\')",
+            (kind, path, _like_prefix(path.rstrip("/") + "/")),
+        ).fetchall()
+        docs = 0
+        orphaned = 0
+        for (doc_id,) in rows:
+            orphaned += self.remove_document_by_id(doc_id)
+            docs += 1
+        return docs, orphaned
+
+    def list_sources(self, kind: str | None = None) -> list[dict]:
+        """Indexed sources grouped by ``repo``: document/chunk counts + a sample path."""
+        where = "WHERE d.kind = ?" if kind is not None else ""
+        params = (kind,) if kind is not None else ()
+        rows = self._conn.execute(
+            f"""
+            SELECT d.repo AS repo,
+                   count(DISTINCT d.doc_id) AS documents,
+                   count(m.mention_id) AS chunks,
+                   min(d.path) AS sample_path
+            FROM documents d
+            LEFT JOIN mentions m ON m.doc_id = d.doc_id
+            {where}
+            GROUP BY d.repo
+            ORDER BY documents DESC
+            """,
+            params,
+        ).fetchall()
+        return [
+            {
+                "repo": r["repo"],
+                "documents": r["documents"],
+                "chunks": r["chunks"],
+                "sample_path": r["sample_path"],
+            }
+            for r in rows
+        ]
+
     # -- indexing ------------------------------------------------------------------------------
 
     def missing_chunk_hashes(self, hashes: Iterable[str]) -> set[str]:

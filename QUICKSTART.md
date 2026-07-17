@@ -105,13 +105,26 @@ Open a **new** Claude Code session (tools load at startup) and the following app
 > Tools are **available** to the agent, not auto-run: Claude calls them when relevant or when you
 > ask. Proactive "always consult qmx" wiring (a hook) is future work.
 
-## 6. Keep it live & maintenance
+## 6. Keep it live, manage projects & maintenance
 
 ```bash
 qmx watch ~/code/my-project   # reindex on save (create/modify/delete)
+qmx index ~/code/my-project   # re-index on demand (incremental; --force to re-embed all)
+
+qmx sources                   # list what's indexed (grouped by repo + counts)
+qmx remove ~/code/my-project  # drop a file or whole directory subtree from the index
+qmx gc                        # purge tombstoned (removed/edited-away) chunks to reclaim space
+
 qmx status                    # documents / chunks / mentions / live vs tombstoned
-qmx gc                        # purge tombstoned (deleted/edited-away) chunks
 ```
+
+**Managing a project's lifecycle:**
+- **Re-index** — just run `qmx index <path>` again; it's incremental (unchanged files skip, changed
+  chunks re-embed, files deleted within the tree are pruned). `qmx watch` does this continuously.
+- **Delete a project** — `qmx remove <path>` drops it from the index (then `qmx gc` reclaims). Or, if
+  you gave the project its own DB (`QMX_DB_PATH=~/.qmx/<name>.db`), just `rm ~/.qmx/<name>.db*`.
+- **Multiple codebases** — index several into one DB (they're distinguished by `path`), or keep one
+  DB per project and switch with `QMX_DB_PATH`.
 
 ## Verifying a query actually hit qmx
 
