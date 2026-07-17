@@ -34,25 +34,36 @@ So you can run everything on one laptop, or keep the index local and offload emb
 
 **Indexing** — files → chunks → vectors (on the backend) → local SQLite index:
 
-```
-        your machine (qmx)                          embedding backend (Ollama)
-  repo ─▶ chunk (tree-sitter) ─▶ chunk text ───────▶  qwen3-embedding  (Qwen, GPU)
-                                      vectors ◀───────────────┘
-                                         │
-                                         ▼
-        SQLite index (local):  sqlite-vec vectors · FTS5 text · content hashes
+```mermaid
+flowchart LR
+  subgraph M["your machine — qmx"]
+    F["repo files"] --> C["chunk<br/>(tree-sitter)"]
+    DB[("SQLite index<br/>sqlite-vec · FTS5 · hashes")]
+  end
+  subgraph B["Ollama backend · GPU"]
+    E["qwen3-embedding<br/>(Qwen)"]
+  end
+  C -- "chunk text" --> E
+  E -- "vectors" --> DB
 ```
 
 **Querying** — only the query string is embedded on the backend; vector + keyword search and
 ranking are entirely local:
 
-```
-        your machine (qmx)                          embedding backend (Ollama)
-  "where is X?" ─▶ query text ───────────────────▶  qwen3-embedding  (Qwen)
-                      1 vector ◀───────────────────────────┘
-                         │
-                         ▼
-   SQLite:  vector (cosine)  +  BM25  ─▶ RRF fuse ─▶ ranked hits (file:line + snippet)
+```mermaid
+flowchart LR
+  subgraph M["your machine — qmx"]
+    QT["query text"]
+    SR["search<br/>vector (cosine) + BM25 → RRF"]
+    DB[("SQLite index")]
+    H["ranked hits<br/>file:line + snippet"]
+    DB --> SR --> H
+  end
+  subgraph B["Ollama backend · GPU"]
+    E["qwen3-embedding<br/>(Qwen)"]
+  end
+  QT -- "query text" --> E
+  E -- "1 vector" --> SR
 ```
 
 Choose where the backend lives with `QMX_OLLAMA_URL` and which model embeds with `embed_model`
