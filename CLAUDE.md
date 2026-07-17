@@ -13,14 +13,16 @@ add on-the-fly chat capture.
 - **Semantic search over code** — AST-aware chunking (tree-sitter), find-by-meaning across many repos.
 - **Chat memory** — index existing Claude Code transcripts (`~/.claude/projects/*.jsonl`) and capture
   new turns live via a Stop hook. Full-fidelity recall + optional distilled summaries.
-- **Local & private** — no code/chat leaves the Mac; nothing embedded to a cloud service.
+- **Local & private** — code/chat never leaves your own machines (Mac + DGX Spark on the LAN);
+  nothing embedded to a cloud service.
 - **Plugs into Claude Code** — resident MCP server exposing `query` / `get` / `status`.
 
 ## Intended stack (finalize after the rewrite-approach decision)
 
 - **Python 3.12**, managed with **`uv`** (never bare `python`/`pip`).
 - **Embeddings / rerank / summarize:** the **Qwen** family (Qwen3-Embedding, Qwen3-Reranker, a Qwen
-  chat model) — one Apache-2.0 stack. Served locally (Ollama or in-process — TBD by chosen option).
+  chat model) — one Apache-2.0 stack. Served by **Ollama on the DGX Spark** (GB10/CUDA); qmx is a
+  thin HTTP client. See `plan/qmx-deployment.md` for the Mac-dev / Spark-prod topology.
 - **Store:** SQLite with `sqlite-vec` (vectors) + FTS5 (BM25). Content-hash tables for incremental
   reindex + dedup.
 - **Chunking:** tree-sitter for code; markdown-aware for docs; JSONL→turn parser for chats.
@@ -42,5 +44,6 @@ add on-the-fly chat capture.
   account, so commits attribute to it (not the separate `dsovlk` account) and no real email lands in
   public history. Do **not** use a corporate email.
 
-> Status: scaffolding. The concrete rewrite approach (fork-and-strip vs from-scratch, model hosting)
-> is being chosen before code lands.
+> Status: scaffolding; plan complete, code not yet landed. Approach **decided** — from-scratch
+> (not a qmd fork); Ollama-on-Spark model hosting; Mac-dev / Spark-prod split. See `plan/` (esp.
+> `qmx-deployment.md`) for the design; build follows the phasing in `plan/qmx-plan.md`.
