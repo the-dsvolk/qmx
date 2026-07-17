@@ -66,6 +66,35 @@ flowchart LR
   E -- "1 vector" --> SR
 ```
 
+**Chat memory** — Claude Code transcripts feed the *same* flat KB two ways: `qmx backfill-chats`
+imports past sessions once, and a Claude Code `Stop` hook runs `qmx capture` on every finished turn.
+Both clean the JSONL to plain turns and reuse the incremental pipeline, so only *new* turns embed;
+`recall` (or `query --kind chat`) reads them back:
+
+```mermaid
+flowchart LR
+  H["Claude Code<br/>Stop hook (per turn)"]
+  subgraph SRC["~/.claude/projects/*.jsonl"]
+    T["session transcripts"]
+  end
+  subgraph M["your machine — qmx"]
+    BF["qmx backfill-chats<br/>(all past sessions)"]
+    CAP["qmx capture<br/>(new turn, live)"]
+    CLEAN["clean turns<br/>drop thinking / tools / side-chains"]
+    DB[("flat KB · SQLite<br/>code + chats")]
+    RC["recall<br/>(query --kind chat)"]
+  end
+  subgraph B["Ollama backend · GPU"]
+    E["qwen3-embedding<br/>(Qwen)"]
+  end
+  H -- "transcript path (stdin)" --> CAP
+  T --> BF --> CLEAN
+  T --> CAP --> CLEAN
+  CLEAN -- "turn text" --> E
+  E -- "vectors — only NEW turns" --> DB
+  DB --> RC
+```
+
 Choose where the backend lives with `QMX_OLLAMA_URL` and which model embeds with `embed_model`
 (see [QUICKSTART.md](./QUICKSTART.md)). Reranking is a seam after RRF — currently off (RRF-only);
 see [plan/qmx-ml-notes.md](./plan/qmx-ml-notes.md).
