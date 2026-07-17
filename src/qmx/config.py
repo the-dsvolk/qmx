@@ -23,6 +23,8 @@ _ENV_MAP = {
     "QMX_EMBED_MODEL": "embed_model",
     "QMX_RERANK_MODEL": "rerank_model",
     "QMX_CHAT_MODEL": "chat_model",
+    "QMX_MCP_HOST": "mcp_host",
+    "QMX_MCP_PORT": "mcp_port",
     "QMX_EMBED_DIM": "embed_dim",
     "QMX_EMBED_BATCH_SIZE": "embed_batch_size",
     "QMX_REQUEST_TIMEOUT": "request_timeout",
@@ -45,6 +47,10 @@ class Settings:
     embed_model: str = "qwen3-embedding"
     rerank_model: str = "qwen3-reranker"
     chat_model: str = "qwen3"
+
+    # Resident MCP server bind address (the Spark serves this on the LAN; clients use QMX_MCP_URL).
+    mcp_host: str = "127.0.0.1"
+    mcp_port: int = 8765
 
     # Embedding dimensionality — must match the served model; stored in ``meta`` so a mismatch
     # forces a rebuild rather than silently corrupting the vector table.
@@ -93,7 +99,7 @@ class Settings:
 def _coerce_value(name: str, raw: object) -> object:
     if name == "db_path":
         return Path(raw).expanduser() if not isinstance(raw, Path) else raw
-    if name in {"embed_dim", "embed_batch_size", "max_retries"}:
+    if name in {"embed_dim", "embed_batch_size", "max_retries", "mcp_port"}:
         return int(raw)
     if name in {"request_timeout", "retry_base_delay"}:
         return float(raw)

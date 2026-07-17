@@ -85,6 +85,20 @@ def _cmd_gc(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_serve(settings: Settings, args: argparse.Namespace) -> int:
+    from qmx.mcp_server import serve  # deferred: pulls in the mcp SDK only when serving
+
+    transport = "stdio" if args.transport == "stdio" else "streamable-http"
+    host = args.host or settings.mcp_host
+    port = args.port or settings.mcp_port
+    if transport == "stdio":
+        print("qmx MCP server on stdio", file=sys.stderr)
+    else:
+        print(f"qmx MCP server on http://{host}:{port}/mcp", file=sys.stderr)
+    serve(settings, transport=transport, host=host, port=port)
+    return 0
+
+
 def _cmd_query(settings: Settings, args: argparse.Namespace) -> int:
     try:
         with _open_store(settings) as store, OllamaEmbedder(settings) as embedder:
@@ -128,6 +142,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("gc", help="purge tombstoned (unreferenced) chunks")
 
+    p_serve = sub.add_parser("serve", help="run the resident MCP server")
+    p_serve.add_argument(
+        "--transport", choices=["http", "stdio"], default="http", help="default: http"
+    )
+    p_serve.add_argument("--host", default=None, help="bind host (default from config)")
+    p_serve.add_argument("--port", type=int, default=None, help="bind port (default from config)")
+
     return parser
 
 
@@ -137,6 +158,7 @@ _COMMANDS = {
     "query": _cmd_query,
     "watch": _cmd_watch,
     "gc": _cmd_gc,
+    "serve": _cmd_serve,
 }
 
 
