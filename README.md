@@ -18,7 +18,23 @@ Powered by the [Qwen](https://github.com/QwenLM) embedding/rerank models and
 
 ## Status
 
-Early scaffolding — architecture being finalized. See [CLAUDE.md](./CLAUDE.md) for the design.
+Phase 0 (foundation) landing: config seam, Ollama embed client, and the `sqlite-vec` + FTS5 store
+with cosine top-k. See [`plan/`](./plan) for the full design and phasing.
+
+## Development
+
+Python 3.12 + [`uv`](https://docs.astral.sh/uv/). The model backend (Ollama) runs on the DGX Spark
+in prod; point at it with `QMX_OLLAMA_URL` (see [`plan/qmx-deployment.md`](./plan/qmx-deployment.md)).
+
+```bash
+uv sync                         # create the venv, install qmx + dev tools
+uv run pytest                   # unit tests (live-Ollama tests skip when unreachable)
+uv run ruff check . && uv run ruff format --check .
+uv run qmx status               # resolved config + index stats
+
+# run the live embed round-trip against the Spark:
+QMX_OLLAMA_URL=http://spark-0e81.local:11434 uv run pytest -m integration
+```
 
 ## License
 
