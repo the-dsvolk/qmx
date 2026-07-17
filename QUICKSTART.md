@@ -46,13 +46,40 @@ mcp_port    = 8765
 # db_path defaults to ~/.qmx/index.db
 ```
 
-Any field can be overridden per-command with a `QMX_*` env var (e.g. `QMX_OLLAMA_URL`).
+Any field can be overridden per-command with a `QMX_*` env var (e.g. `QMX_OLLAMA_URL`,
+`QMX_EMBED_MODEL`, `QMX_DB_PATH`).
 
 Sanity check:
 
 ```bash
 qmx status        # shows resolved config + (empty) index stats
 ```
+
+### Choosing the embedding model
+
+`embed_model` is **any embedding model your Ollama backend serves**, and `embed_dim` **must match
+its output width**. To switch models:
+
+1. **Pull it on the backend** (the machine `ollama_url` points at):
+   ```bash
+   ollama pull qwen3-embedding:0.6b     # run on the Ollama host, or: ollama pull <other-model>
+   ```
+2. **Find its dimension** — embed a probe string and count the vector:
+   ```bash
+   curl -s "$OLLAMA_URL/api/embed" -d '{"model":"qwen3-embedding:0.6b","input":["x"]}' \
+     | python3 -c "import sys,json; print(len(json.load(sys.stdin)['embeddings'][0]))"
+   ```
+3. **Set `embed_model` + `embed_dim`** in `config.toml` to match what step 2 printed.
+
+Guidance:
+- **Bigger model = better recall, but slower and more VRAM.** The Qwen3-Embedding family comes in
+  0.6B / 4B / 8B; **`qwen3-embedding:0.6b` → 1024 dims** (a good default). Larger variants emit wider
+  vectors — probe to confirm. Any Ollama embedding model works (e.g. `nomic-embed-text`,
+  `mxbai-embed-large`, `bge-m3`) as long as `embed_dim` matches.
+- **The model and dim are baked into the index.** qmx records them and **refuses to open an index
+  built with a different model/dim** (it tells you to rebuild). So changing the embedding model means
+  re-embedding: `rm` the DB (or use a fresh `QMX_DB_PATH`) and re-`qmx index`.
+- **Use the same model for indexing and querying** — mismatched vector spaces return garbage.
 
 ## 4. Index a repo and search it
 
