@@ -85,6 +85,42 @@ def _cmd_gc(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_sources(settings: Settings, args: argparse.Namespace) -> int:
+    try:
+        with _open_store(settings) as store:
+            sources = store.list_sources()
+    except StoreSchemaMismatch as exc:
+        print(f"sources failed: {exc}", file=sys.stderr)
+        return 1
+    if not sources:
+        print("(nothing indexed)")
+        return 0
+    width = max(len(s["repo"] or "?") for s in sources)
+    for s in sources:
+        print(
+            f"{(s['repo'] or '?'):<{width}}  {s['documents']:>5} files  "
+            f"{s['chunks']:>6} chunks  {s['sample_path']}"
+        )
+    return 0
+
+
+def _cmd_remove(settings: Settings, args: argparse.Namespace) -> int:
+    target = str(Path(args.path).resolve())
+    try:
+        with _open_store(settings) as store:
+            docs, orphaned = store.remove_source(target)
+    except StoreSchemaMismatch as exc:
+        print(f"remove failed: {exc}", file=sys.stderr)
+        return 1
+    if docs == 0:
+        print(f"nothing indexed under {target}")
+        return 0
+    print(
+        f"removed {docs} document(s), orphaned {orphaned} chunk(s) — run `qmx gc` to reclaim space"
+    )
+    return 0
+
+
 def _cmd_serve(settings: Settings, args: argparse.Namespace) -> int:
     from qmx.mcp_server import serve  # deferred: pulls in the mcp SDK only when serving
 
@@ -140,6 +176,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_watch = sub.add_parser("watch", help="watch path(s) and keep the index live")
     p_watch.add_argument("paths", nargs="+", help="files or directories to watch")
 
+    sub.add_parser("sources", help="list indexed sources (grouped by repo)")
+
+    p_remove = sub.add_parser("remove", help="remove a file or directory subtree from the index")
+    p_remove.add_argument("path", help="file or directory to drop from the index")
+
     sub.add_parser("gc", help="purge tombstoned (unreferenced) chunks")
 
     p_serve = sub.add_parser("serve", help="run the resident MCP server")
@@ -157,6 +198,8 @@ _COMMANDS = {
     "index": _cmd_index,
     "query": _cmd_query,
     "watch": _cmd_watch,
+    "sources": _cmd_sources,
+    "remove": _cmd_remove,
     "gc": _cmd_gc,
     "serve": _cmd_serve,
 }

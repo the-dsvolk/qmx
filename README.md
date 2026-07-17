@@ -4,7 +4,7 @@ Local, private semantic search over your **code and chats**.
 
 qmx indexes source repositories (AST-aware) and your Claude Code conversation history into an
 on-device vector + full-text index, and serves them by *meaning* to agents via MCP — or to you on
-the command line. Nothing leaves your machine.
+the command line. Everything runs on hardware you control — no cloud service.
 
 Powered by the [Qwen](https://github.com/QwenLM) embedding/rerank models and
 [`sqlite-vec`](https://github.com/asg017/sqlite-vec). Derived from
@@ -17,7 +17,58 @@ Powered by the [Qwen](https://github.com/QwenLM) embedding/rerank models and
 
 - **Find by meaning, not grep** — "where's the launcher logic" instead of guessing symbol names.
 - **Remember conversations** — semantic recall across every past Claude Code session.
-- **Private by construction** — proprietary code and chats are embedded and stored locally only.
+- **Private by construction** — code and chats are embedded by an Ollama backend you control and
+  stored in a local index — never sent to a cloud service.
+
+## Architecture
+
+qmx is two cooperating pieces joined by one config knob (`QMX_OLLAMA_URL`):
+
+- **qmx** (this tool) — the **index and search**: chunking, the SQLite store (`sqlite-vec` + FTS5),
+  hybrid ranking, the CLI, and the MCP server all run **on your machine**.
+- **An Ollama backend** — produces the **embeddings** with a **Qwen** model. It can be the *same*
+  machine, or a GPU box on your LAN (e.g. a DGX Spark). The only thing that crosses to it is the
+  text being embedded; the index and all search stay local.
+
+So you can run everything on one laptop, or keep the index local and offload embeddings to a GPU box.
+
+**Indexing** — files → chunks → vectors (on the backend) → local SQLite index:
+
+```mermaid
+flowchart LR
+  subgraph M["your machine — qmx"]
+    F["repo files"] --> C["chunk<br/>(tree-sitter)"]
+    DB[("SQLite index<br/>sqlite-vec · FTS5 · hashes")]
+  end
+  subgraph B["Ollama backend · GPU"]
+    E["qwen3-embedding<br/>(Qwen)"]
+  end
+  C -- "chunk text" --> E
+  E -- "vectors" --> DB
+```
+
+**Querying** — only the query string is embedded on the backend; vector + keyword search and
+ranking are entirely local:
+
+```mermaid
+flowchart LR
+  subgraph M["your machine — qmx"]
+    QT["query text"]
+    SR["search<br/>vector (cosine) + BM25 → RRF"]
+    DB[("SQLite index")]
+    H["ranked hits<br/>file:line + snippet"]
+    DB --> SR --> H
+  end
+  subgraph B["Ollama backend · GPU"]
+    E["qwen3-embedding<br/>(Qwen)"]
+  end
+  QT -- "query text" --> E
+  E -- "1 vector" --> SR
+```
+
+Choose where the backend lives with `QMX_OLLAMA_URL` and which model embeds with `embed_model`
+(see [QUICKSTART.md](./QUICKSTART.md)). Reranking is a seam after RRF — currently off (RRF-only);
+see [plan/qmx-ml-notes.md](./plan/qmx-ml-notes.md).
 
 ## Status
 

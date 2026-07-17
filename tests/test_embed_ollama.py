@@ -10,7 +10,7 @@ import pytest
 
 from qmx.config import Settings
 from qmx.embed import OllamaEmbedder
-from qmx.store import Chunk, Store
+from qmx.store import Chunk, Store, hash_text
 
 pytestmark = pytest.mark.integration
 
@@ -39,7 +39,8 @@ def test_live_embed_and_search(settings, tmp_path):
 
         with Store.open(tmp_path / "index.db", settings.embed_dim, settings.embed_model) as store:
             doc_id = store.upsert_document(kind="code", path="live.py")
-            store.add_chunks(doc_id, [Chunk(text=t) for t in texts], vectors)
+            embeddings = {hash_text(t): v for t, v in zip(texts, vectors, strict=True)}
+            store.reindex_document(doc_id, [Chunk(text=t) for t in texts], embeddings)
             [qvec] = embedder.embed(["how do I retry a failed request?"])
             hits = store.search_vec(qvec, k=3)
             assert hits[0].text == "retry logic with exponential backoff"
