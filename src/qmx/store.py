@@ -1,8 +1,16 @@
 """SQLite store — ``sqlite-vec`` (vectors) + FTS5 (BM25) + hash tables.
 
 The DB is a **rebuildable shadow** of the on-disk source (``plan/qmx-plan.md``): files are truth,
-this is a cache. Phase 0 delivers the schema, migrations, chunk upsert with content-hash dedup, and
-cosine top-k vector search — enough for the round-trip acceptance test.
+this is a cache.
+
+Schema v3 separates chunk **content** from its **mentions** — the robustness core:
+
+- ``chunks`` — one row per unique chunk text (``chunk_hash``), embedded **once**. Shared identical
+  code across files dedups to a single embedding.
+- ``mentions`` — where a chunk appears in a document (doc, ord, lines, symbol). Many mentions can
+  point at one chunk; deleting a document drops its mentions (FK cascade).
+- A chunk with **zero mentions is a tombstone**: excluded from search but kept so a rename/re-add
+  reuses its warm embedding. :meth:`Store.purge_orphans` hard-deletes tombstones.
 """
 
 from __future__ import annotations
@@ -10,17 +18,18 @@ from __future__ import annotations
 import hashlib
 import re
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 import sqlite_vec
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+_IN_BATCH = 500  # max params per IN(...) chunk
 
 
 class StoreSchemaMismatch(RuntimeError):
-    """The DB was built with a different embedding model/dim — it must be rebuilt."""
+    """The DB was built with a different embedding model/dim/schema — it must be rebuilt."""
 
 
 def hash_text(text: str) -> str:
@@ -56,8 +65,18 @@ class SearchHit:
     symbol: str | None = None
 
 
+@dataclass(slots=True)
+class ReindexResult:
+    """Outcome of reindexing one document."""
+
+    embedded: int = 0  # new content chunks that required an embedding
+    reused: int = 0  # distinct chunks already present (dedup / unchanged)
+    mentions: int = 0  # mentions written for the document
+    orphaned: int = 0  # chunks that lost their last mention (now tombstones)
+
+
 class Store:
-    """Owns the SQLite connection and the vector/FTS schema."""
+    """Owns the SQLite connection and the vector/FTS/mentions schema."""
 
     def __init__(self, conn: sqlite3.Connection, embed_dim: int, embed_model: str) -> None:
         self._conn = conn
@@ -93,8 +112,7 @@ class Store:
     # -- schema --------------------------------------------------------------------------------
 
     def _migrate(self) -> None:
-        cur = self._conn.execute("PRAGMA user_version")
-        version = cur.fetchone()[0]
+        version = self._conn.execute("PRAGMA user_version").fetchone()[0]
         if version == 0:
             self._create_schema()
             self._conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
@@ -124,26 +142,28 @@ class Store:
 
             CREATE TABLE chunks (
                 chunk_id   INTEGER PRIMARY KEY,
+                chunk_hash TEXT NOT NULL UNIQUE,   -- unique content -> embedded once
+                text       TEXT NOT NULL
+            );
+
+            CREATE TABLE mentions (
+                mention_id INTEGER PRIMARY KEY,
                 doc_id     INTEGER NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
+                chunk_id   INTEGER NOT NULL REFERENCES chunks(chunk_id),
                 ord        INTEGER NOT NULL DEFAULT 0,
-                text       TEXT NOT NULL,
-                chunk_hash TEXT NOT NULL UNIQUE,   -- dedup: identical text embeds once
                 start_line INTEGER,
                 end_line   INTEGER,
-                symbol     TEXT,
-                tombstoned INTEGER NOT NULL DEFAULT 0
+                symbol     TEXT
             );
-            CREATE INDEX idx_chunks_doc ON chunks(doc_id);
+            CREATE INDEX idx_mentions_doc ON mentions(doc_id);
+            CREATE INDEX idx_mentions_chunk ON mentions(chunk_id);
             """
         )
-        # Vector table — dimension is fixed at creation; cosine distance to match search semantics.
         c.execute(
             "CREATE VIRTUAL TABLE vec_chunks USING vec0("
             "chunk_id INTEGER PRIMARY KEY, "
             f"embedding float[{self._embed_dim}] distance_metric=cosine)"
         )
-        # FTS5 over chunk text for BM25. Plain (not contentless) so rows can be DELETEd on
-        # re-index; external-content + triggers is a Phase 2 space optimization.
         c.execute("CREATE VIRTUAL TABLE fts_chunks USING fts5(text)")
         c.execute("INSERT INTO meta(key, value) VALUES('embed_dim', ?)", (str(self._embed_dim),))
         c.execute("INSERT INTO meta(key, value) VALUES('embed_model', ?)", (self._embed_model,))
@@ -158,7 +178,7 @@ class Store:
                 f"but config is {self._embed_model!r}/dim {self._embed_dim}; rebuild the index"
             )
 
-    # -- writes --------------------------------------------------------------------------------
+    # -- documents -----------------------------------------------------------------------------
 
     def upsert_document(
         self,
@@ -191,63 +211,144 @@ class Store:
         ).fetchone()
         return row[0] if row is not None else None
 
-    def add_chunks(
-        self, doc_id: int, chunks: Sequence[Chunk], embeddings: Sequence[Sequence[float]]
-    ) -> list[int]:
-        """Store chunks + their embeddings under ``doc_id``. Dedups on ``chunk_hash``.
+    def documents_under(self, kind: str, path_prefix: str) -> list[tuple[int, str]]:
+        """``(doc_id, path)`` for documents whose path starts with ``path_prefix``."""
+        rows = self._conn.execute(
+            "SELECT doc_id, path FROM documents WHERE kind=? AND path LIKE ? ESCAPE '\\'",
+            (kind, _like_prefix(path_prefix)),
+        ).fetchall()
+        return [(r[0], r[1]) for r in rows]
 
-        Returns the ``chunk_id`` for each input chunk (existing id when a hash already present).
+    def remove_document(self, kind: str, path: str) -> int:
+        """Delete a document by ``kind, path``; returns the number of chunks it orphaned."""
+        row = self._conn.execute(
+            "SELECT doc_id FROM documents WHERE kind=? AND path=?", (kind, path)
+        ).fetchone()
+        return 0 if row is None else self.remove_document_by_id(row[0])
+
+    def remove_document_by_id(self, doc_id: int) -> int:
+        """Delete a document (cascading its mentions); returns chunks left with no mentions."""
+        candidate_ids = {
+            r[0]
+            for r in self._conn.execute(
+                "SELECT chunk_id FROM mentions WHERE doc_id=?", (doc_id,)
+            ).fetchall()
+        }
+        with self._conn:
+            self._conn.execute("DELETE FROM documents WHERE doc_id=?", (doc_id,))
+        return self._count_orphans(candidate_ids)
+
+    # -- indexing ------------------------------------------------------------------------------
+
+    def missing_chunk_hashes(self, hashes: Iterable[str]) -> set[str]:
+        """Which of ``hashes`` are not yet stored (i.e. still need embedding)."""
+        wanted = set(hashes)
+        if not wanted:
+            return set()
+        found: set[str] = set()
+        items = list(wanted)
+        for start in range(0, len(items), _IN_BATCH):
+            batch = items[start : start + _IN_BATCH]
+            placeholders = ",".join("?" * len(batch))
+            found.update(
+                r[0]
+                for r in self._conn.execute(
+                    f"SELECT chunk_hash FROM chunks WHERE chunk_hash IN ({placeholders})", batch
+                ).fetchall()
+            )
+        return wanted - found
+
+    def reindex_document(
+        self,
+        doc_id: int,
+        chunks: Sequence[Chunk],
+        new_embeddings: dict[str, Sequence[float]],
+    ) -> ReindexResult:
+        """Replace ``doc_id``'s mentions with ``chunks``, embedding only content not already stored.
+
+        ``new_embeddings`` must supply a vector for every chunk hash returned by
+        :meth:`missing_chunk_hashes` for these chunks. Existing content (dedup, unchanged, or a
+        tombstone being revived) is reused without re-embedding.
         """
-        if len(chunks) != len(embeddings):
-            raise ValueError(f"{len(chunks)} chunks but {len(embeddings)} embeddings")
-        ids: list[int] = []
-        with self._conn:  # single transaction — crash-safe per batch
-            for chunk, vector in zip(chunks, embeddings, strict=True):
-                if len(vector) != self._embed_dim:
-                    raise ValueError(f"embedding dim {len(vector)} != {self._embed_dim}")
-                existing = self._conn.execute(
-                    "SELECT chunk_id FROM chunks WHERE chunk_hash=?", (chunk.chunk_hash,)
-                ).fetchone()
-                if existing is not None:
-                    ids.append(existing[0])
+        result = ReindexResult()
+        with self._conn:  # one transaction — crash-safe per document
+            hash_to_id: dict[str, int] = {}
+            for chunk in chunks:
+                h = chunk.chunk_hash
+                if h in hash_to_id:
                     continue
-                cur = self._conn.execute(
+                row = self._conn.execute(
+                    "SELECT chunk_id FROM chunks WHERE chunk_hash=?", (h,)
+                ).fetchone()
+                if row is not None:
+                    hash_to_id[h] = row[0]
+                    result.reused += 1
+                else:
+                    hash_to_id[h] = self._insert_content(h, chunk.text, new_embeddings)
+                    result.embedded += 1
+
+            old_ids = {
+                r[0]
+                for r in self._conn.execute(
+                    "SELECT chunk_id FROM mentions WHERE doc_id=?", (doc_id,)
+                ).fetchall()
+            }
+            self._conn.execute("DELETE FROM mentions WHERE doc_id=?", (doc_id,))
+            for chunk in chunks:
+                self._conn.execute(
                     """
-                    INSERT INTO chunks(doc_id, ord, text, chunk_hash, start_line, end_line, symbol)
-                    VALUES(?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO mentions(doc_id, chunk_id, ord, start_line, end_line, symbol)
+                    VALUES(?, ?, ?, ?, ?, ?)
                     """,
                     (
                         doc_id,
+                        hash_to_id[chunk.chunk_hash],
                         chunk.ord,
-                        chunk.text,
-                        chunk.chunk_hash,
                         chunk.start_line,
                         chunk.end_line,
                         chunk.symbol,
                     ),
                 )
-                chunk_id = cur.lastrowid
-                self._conn.execute(
-                    "INSERT INTO vec_chunks(chunk_id, embedding) VALUES(?, ?)",
-                    (chunk_id, sqlite_vec.serialize_float32(list(vector))),
-                )
-                self._conn.execute(
-                    "INSERT INTO fts_chunks(rowid, text) VALUES(?, ?)", (chunk_id, chunk.text)
-                )
-                ids.append(chunk_id)
-        return ids
+            result.mentions = len(chunks)
+            result.orphaned = self._count_orphans(old_ids - set(hash_to_id.values()))
+        return result
 
-    def clear_document_chunks(self, doc_id: int) -> int:
-        """Remove all chunks (and their vec/fts rows) for a document; returns the count removed.
+    def _insert_content(
+        self, chunk_hash: str, text: str, new_embeddings: dict[str, Sequence[float]]
+    ) -> int:
+        vector = new_embeddings.get(chunk_hash)
+        if vector is None:
+            raise ValueError(f"no embedding supplied for new chunk {chunk_hash[:12]}")
+        if len(vector) != self._embed_dim:
+            raise ValueError(f"embedding dim {len(vector)} != {self._embed_dim}")
+        cur = self._conn.execute(
+            "INSERT INTO chunks(chunk_hash, text) VALUES(?, ?)", (chunk_hash, text)
+        )
+        chunk_id = cur.lastrowid
+        self._conn.execute(
+            "INSERT INTO vec_chunks(chunk_id, embedding) VALUES(?, ?)",
+            (chunk_id, sqlite_vec.serialize_float32(list(vector))),
+        )
+        self._conn.execute("INSERT INTO fts_chunks(rowid, text) VALUES(?, ?)", (chunk_id, text))
+        return chunk_id
 
-        Used to re-index a changed file wholesale. NOTE: with the Phase 0 global-unique dedup a
-        chunk lives under a single ``doc_id``; a chunk whose identical text also appears in another
-        file is dropped here. The proper chunk<->document link table is Phase 2 robustness work.
-        """
+    def _count_orphans(self, candidate_ids: set[int]) -> int:
+        return sum(
+            1
+            for cid in candidate_ids
+            if self._conn.execute(
+                "SELECT 1 FROM mentions WHERE chunk_id=? LIMIT 1", (cid,)
+            ).fetchone()
+            is None
+        )
+
+    def purge_orphans(self) -> int:
+        """Hard-delete tombstoned chunks (zero mentions) and their vectors/FTS rows."""
         ids = [
             r[0]
             for r in self._conn.execute(
-                "SELECT chunk_id FROM chunks WHERE doc_id=?", (doc_id,)
+                "SELECT chunk_id FROM chunks c "
+                "WHERE NOT EXISTS(SELECT 1 FROM mentions m WHERE m.chunk_id=c.chunk_id)"
             ).fetchall()
         ]
         if not ids:
@@ -256,7 +357,7 @@ class Store:
             for cid in ids:
                 self._conn.execute("DELETE FROM vec_chunks WHERE chunk_id=?", (cid,))
                 self._conn.execute("DELETE FROM fts_chunks WHERE rowid=?", (cid,))
-            self._conn.execute("DELETE FROM chunks WHERE doc_id=?", (doc_id,))
+                self._conn.execute("DELETE FROM chunks WHERE chunk_id=?", (cid,))
         return len(ids)
 
     # -- reads ---------------------------------------------------------------------------------
@@ -264,99 +365,103 @@ class Store:
     def search_vec(
         self, query_embedding: Sequence[float], k: int = 10, kind: str | None = None
     ) -> list[SearchHit]:
-        """Cosine top-k over live (non-tombstoned) chunks, optionally filtered by ``kind``."""
+        """Cosine top-k over live (mentioned) chunks, optionally filtered by ``kind``."""
         if len(query_embedding) != self._embed_dim:
             raise ValueError(f"query dim {len(query_embedding)} != {self._embed_dim}")
-        # Over-fetch when filtering so the post-filter still yields up to k live hits.
-        fetch = k * 5 if kind is not None else k
+        # Over-fetch: the ANN table may still hold tombstoned (orphan) vectors that the mentions
+        # join drops, and a kind filter trims further.
+        fetch = max(k * 4, k + 20)
         rows = self._conn.execute(
-            """
-            SELECT v.chunk_id, v.distance, c.doc_id, c.text, c.start_line, c.end_line, c.symbol,
-                   d.kind, d.path
+            f"""
+            SELECT v.chunk_id, v.distance, c.text,
+                   m.doc_id, m.start_line, m.end_line, m.symbol, d.kind, d.path
             FROM vec_chunks v
             JOIN chunks c ON c.chunk_id = v.chunk_id
-            JOIN documents d ON d.doc_id = c.doc_id
-            WHERE v.embedding MATCH ? AND k = ? AND c.tombstoned = 0
+            JOIN mentions m ON m.mention_id = {_REP_MENTION}
+            JOIN documents d ON d.doc_id = m.doc_id
+            WHERE v.embedding MATCH ? AND k = ?
             ORDER BY v.distance
             """,
             (sqlite_vec.serialize_float32(list(query_embedding)), fetch),
         ).fetchall()
-        hits = [
-            SearchHit(
-                chunk_id=r["chunk_id"],
-                doc_id=r["doc_id"],
-                kind=r["kind"],
-                path=r["path"],
-                text=r["text"],
-                distance=r["distance"],
-                start_line=r["start_line"],
-                end_line=r["end_line"],
-                symbol=r["symbol"],
-            )
-            for r in rows
-            if kind is None or r["kind"] == kind
-        ]
-        return hits[:k]
+        return _rows_to_hits(rows, k, kind, distance_key="distance")
 
     def search_fts(self, query: str, k: int = 10, kind: str | None = None) -> list[SearchHit]:
-        """BM25 top-k over live chunks via FTS5, optionally filtered by ``kind``.
-
-        ``distance`` carries the FTS5 ``rank`` (more negative = better); callers that fuse rankings
-        (see ``search.py``) use position, not the raw value.
-        """
+        """BM25 top-k over live chunks via FTS5, optionally filtered by ``kind``."""
         match = _fts_match_query(query)
         if match is None:
             return []
-        fetch = k * 5 if kind is not None else k
+        fetch = max(k * 4, k + 20)
         rows = self._conn.execute(
-            """
-            SELECT f.rowid AS chunk_id, f.rank AS rank, c.doc_id, c.text,
-                   c.start_line, c.end_line, c.symbol, d.kind, d.path
+            f"""
+            SELECT f.rowid AS chunk_id, f.rank AS distance, c.text,
+                   m.doc_id, m.start_line, m.end_line, m.symbol, d.kind, d.path
             FROM fts_chunks f
             JOIN chunks c ON c.chunk_id = f.rowid
-            JOIN documents d ON d.doc_id = c.doc_id
-            WHERE fts_chunks MATCH ? AND c.tombstoned = 0
+            JOIN mentions m ON m.mention_id = {_REP_MENTION}
+            JOIN documents d ON d.doc_id = m.doc_id
+            WHERE fts_chunks MATCH ?
             ORDER BY f.rank
             LIMIT ?
             """,
             (match, fetch),
         ).fetchall()
-        hits = [
-            SearchHit(
-                chunk_id=r["chunk_id"],
-                doc_id=r["doc_id"],
-                kind=r["kind"],
-                path=r["path"],
-                text=r["text"],
-                distance=r["rank"],
-                start_line=r["start_line"],
-                end_line=r["end_line"],
-                symbol=r["symbol"],
-            )
-            for r in rows
-            if kind is None or r["kind"] == kind
-        ]
-        return hits[:k]
+        return _rows_to_hits(rows, k, kind, distance_key="distance")
 
     def counts(self) -> dict[str, int]:
-        """Row counts for ``status`` / smoke tests."""
+        """Base row counts (documents, content chunks, vectors)."""
         q = lambda t: self._conn.execute(f"SELECT count(*) FROM {t}").fetchone()[0]  # noqa: E731
-        return {
-            "documents": q("documents"),
-            "chunks": q("chunks"),
-            "vectors": q("vec_chunks"),
-        }
+        return {"documents": q("documents"), "chunks": q("chunks"), "vectors": q("vec_chunks")}
 
+    def index_stats(self) -> dict[str, int]:
+        """Richer stats for ``status``: live vs tombstoned chunks and total mentions."""
+        base = self.counts()
+        orphans = self._conn.execute(
+            "SELECT count(*) FROM chunks c "
+            "WHERE NOT EXISTS(SELECT 1 FROM mentions m WHERE m.chunk_id=c.chunk_id)"
+        ).fetchone()[0]
+        base["mentions"] = self._conn.execute("SELECT count(*) FROM mentions").fetchone()[0]
+        base["live_chunks"] = base["chunks"] - orphans
+        base["tombstoned_chunks"] = orphans
+        return base
+
+
+# One mention per chunk for display metadata (lowest mention_id). Correlated so orphan chunks —
+# with no mention — yield NULL and are dropped by the INNER JOIN, excluding tombstones from search.
+_REP_MENTION = "(SELECT MIN(mm.mention_id) FROM mentions mm WHERE mm.chunk_id = c.chunk_id)"
 
 _FTS_TOKEN = re.compile(r"[A-Za-z0-9_]+")
 
 
-def _fts_match_query(text: str) -> str | None:
-    """Turn free text into a safe FTS5 MATCH expression: OR of quoted alnum tokens.
+def _rows_to_hits(
+    rows: Sequence[sqlite3.Row], k: int, kind: str | None, *, distance_key: str
+) -> list[SearchHit]:
+    hits = [
+        SearchHit(
+            chunk_id=r["chunk_id"],
+            doc_id=r["doc_id"],
+            kind=r["kind"],
+            path=r["path"],
+            text=r["text"],
+            distance=r[distance_key],
+            start_line=r["start_line"],
+            end_line=r["end_line"],
+            symbol=r["symbol"],
+        )
+        for r in rows
+        if kind is None or r["kind"] == kind
+    ]
+    return hits[:k]
 
-    Quoting each token neutralises FTS5 operators/syntax in user input; ``None`` when there is
-    nothing to match.
-    """
+
+def _like_prefix(prefix: str) -> str:
+    """Escape LIKE wildcards in ``prefix`` and append ``%`` for a prefix match."""
+    escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return escaped + "%"
+
+
+def _fts_match_query(text: str) -> str | None:
+    """Turn free text into a safe FTS5 MATCH expression: OR of quoted alnum tokens."""
     tokens = _FTS_TOKEN.findall(text)
     if not tokens:
         return None

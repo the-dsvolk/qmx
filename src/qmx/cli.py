@@ -1,7 +1,7 @@
 """qmx CLI — thin admin surface over the store/embed/index/search layers.
 
-Ships ``status`` (Phase 0) plus ``index`` and ``query`` (Phase 1). Later phases add ``serve``,
-``backfill-chats``, and ``capture`` per ``plan/qmx-plan.md``.
+Ships ``status`` / ``index`` / ``query`` plus ``watch`` and ``gc`` (Phase 2). Later phases add
+``serve``, ``backfill-chats``, and ``capture`` per ``plan/qmx-plan.md``.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from qmx.embed import EmbedBackendError, OllamaEmbedder
 from qmx.index import index_paths
 from qmx.search import search
 from qmx.store import Store, StoreSchemaMismatch
+from qmx.watch import watch
 
 
 def _open_store(settings: Settings) -> Store:
@@ -27,7 +28,7 @@ def _cmd_status(settings: Settings, args: argparse.Namespace) -> int:
     info: dict[str, object] = {"config": settings.as_dict()}
     try:
         with _open_store(settings) as store:
-            info["index"] = store.counts()
+            info["index"] = store.index_stats()
     except StoreSchemaMismatch as exc:
         info["index_error"] = str(exc)
     print(json.dumps(info, indent=2))
@@ -47,11 +48,40 @@ def _cmd_index(settings: Settings, args: argparse.Namespace) -> int:
         print(f"index failed: {exc}", file=sys.stderr)
         return 1
     print(
-        f"indexed {stats.files_indexed} file(s), {stats.chunks_added} chunk(s); "
-        f"skipped {stats.files_skipped}, scanned {stats.files_scanned}"
+        f"indexed {stats.files_indexed} file(s): {stats.chunks_embedded} embedded, "
+        f"{stats.chunks_reused} reused; removed {stats.files_removed} deleted, "
+        f"orphaned {stats.chunks_orphaned}; skipped {stats.files_skipped}, "
+        f"scanned {stats.files_scanned}"
     )
     for err in stats.errors:
         print(f"  ! {err}", file=sys.stderr)
+    return 0
+
+
+def _cmd_watch(settings: Settings, args: argparse.Namespace) -> int:
+    paths = [Path(p) for p in args.paths]
+    missing = [str(p) for p in paths if not p.exists()]
+    if missing:
+        print(f"no such path(s): {', '.join(missing)}", file=sys.stderr)
+        return 2
+    try:
+        with _open_store(settings) as store, OllamaEmbedder(settings) as embedder:
+            print(f"watching {', '.join(str(p) for p in paths)} — Ctrl-C to stop")
+            watch(paths, store, embedder)
+    except StoreSchemaMismatch as exc:
+        print(f"watch failed: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _cmd_gc(settings: Settings, args: argparse.Namespace) -> int:
+    try:
+        with _open_store(settings) as store:
+            purged = store.purge_orphans()
+    except StoreSchemaMismatch as exc:
+        print(f"gc failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"purged {purged} tombstoned chunk(s)")
     return 0
 
 
@@ -93,10 +123,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_query.add_argument("-k", type=int, default=5, help="number of results (default 5)")
     p_query.add_argument("--kind", default=None, help="filter by kind (code|doc|chat|learning)")
 
+    p_watch = sub.add_parser("watch", help="watch path(s) and keep the index live")
+    p_watch.add_argument("paths", nargs="+", help="files or directories to watch")
+
+    sub.add_parser("gc", help="purge tombstoned (unreferenced) chunks")
+
     return parser
 
 
-_COMMANDS = {"status": _cmd_status, "index": _cmd_index, "query": _cmd_query}
+_COMMANDS = {
+    "status": _cmd_status,
+    "index": _cmd_index,
+    "query": _cmd_query,
+    "watch": _cmd_watch,
+    "gc": _cmd_gc,
+}
 
 
 def main(argv: list[str] | None = None) -> int:
