@@ -31,6 +31,7 @@ _ENV_MAP = {
     "QMX_MAX_RETRIES": "max_retries",
     "QMX_RETRY_BASE_DELAY": "retry_base_delay",
     "QMX_MEMORY_GLOBS": "memory_globs",
+    "QMX_CODE_ROOTS": "code_roots",
 }
 
 # Where Claude memory lives. Globs (``~`` expanded) matching memory dirs or .md files; a dir match
@@ -70,6 +71,9 @@ class Settings:
     # Claude memory sources (kind="memory"). A TOML list, or comma-separated in the env var.
     memory_globs: tuple[str, ...] = DEFAULT_MEMORY_GLOBS
 
+    # Code repos to keep indexed (kind="code"), swept by ``qmx refresh``. Same list format.
+    code_roots: tuple[str, ...] = ()
+
     @classmethod
     def load(cls, config_path: Path | None = None, env: dict[str, str] | None = None) -> Settings:
         """Build settings from defaults, an optional TOML file, then ``QMX_*`` env vars."""
@@ -102,13 +106,14 @@ class Settings:
         d = asdict(self)
         d["db_path"] = str(self.db_path)
         d["memory_globs"] = list(self.memory_globs)
+        d["code_roots"] = list(self.code_roots)
         return d
 
 
 def _coerce_value(name: str, raw: object) -> object:
     if name == "db_path":
         return Path(raw).expanduser() if not isinstance(raw, Path) else raw
-    if name == "memory_globs":
+    if name in {"memory_globs", "code_roots"}:
         items = raw.split(",") if isinstance(raw, str) else list(raw)
         return tuple(s.strip() for s in items if str(s).strip())
     if name in {"embed_dim", "embed_batch_size", "max_retries", "mcp_port"}:

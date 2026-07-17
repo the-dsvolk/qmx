@@ -87,6 +87,32 @@ def _cmd_capture(settings: Settings, args: argparse.Namespace) -> int:
     return capture(sys.stdin.read(), settings)
 
 
+def _cmd_refresh(settings: Settings, args: argparse.Namespace) -> int:
+    """Sync the flat KB from all configured sources: code_roots + chats + memory."""
+    roots = [Path(r).expanduser() for r in settings.code_roots]
+    missing = [str(p) for p in roots if not p.exists()]
+    if missing:
+        print(f"code_roots not found: {', '.join(missing)}", file=sys.stderr)
+        return 2
+    try:
+        with _open_store(settings) as store, OllamaEmbedder(settings) as embedder:
+            code = index_paths(roots, store, embedder, force=args.force)
+            chats = backfill_chats(DEFAULT_PROJECTS_DIR, store, embedder, force=args.force)
+            mem = index_memory(settings.memory_globs, store, embedder, force=args.force)
+    except (StoreSchemaMismatch, EmbedBackendError) as exc:
+        print(f"refresh failed: {exc}", file=sys.stderr)
+        return 1
+    print(
+        f"code:   {code.files_indexed} files, {code.chunks_embedded} embedded "
+        f"({len(roots)} root(s))\n"
+        f"chats:  {chats.files_indexed} transcripts, {chats.chunks_embedded} turns embedded\n"
+        f"memory: {mem.files_indexed} files, {mem.chunks_embedded} embedded"
+    )
+    for err in (*code.errors, *chats.errors, *mem.errors):
+        print(f"  ! {err}", file=sys.stderr)
+    return 0
+
+
 def _cmd_index_memory(settings: Settings, args: argparse.Namespace) -> int:
     try:
         with _open_store(settings) as store, OllamaEmbedder(settings) as embedder:
@@ -225,6 +251,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_mem = sub.add_parser("index-memory", help="index Claude memory files (kind=memory)")
     p_mem.add_argument("--force", action="store_true", help="re-index unchanged memory files too")
 
+    p_refresh = sub.add_parser(
+        "refresh", help="sync the flat KB: configured code_roots + chats + memory"
+    )
+    p_refresh.add_argument("--force", action="store_true", help="re-index unchanged files too")
+
     p_query = sub.add_parser("query", help="hybrid (vector + BM25) search")
     p_query.add_argument("text", help="the query text")
     p_query.add_argument("-k", type=int, default=5, help="number of results (default 5)")
@@ -256,6 +287,7 @@ _COMMANDS = {
     "backfill-chats": _cmd_backfill_chats,
     "capture": _cmd_capture,
     "index-memory": _cmd_index_memory,
+    "refresh": _cmd_refresh,
     "query": _cmd_query,
     "watch": _cmd_watch,
     "sources": _cmd_sources,

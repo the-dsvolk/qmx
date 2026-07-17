@@ -165,12 +165,23 @@ def index_transcript(
     return stats
 
 
+# Nested transcript dirs to skip: subagent + workflow sub-transcripts are internal machinery,
+# not the human/assistant conversation (they'd add empty/noise docs and pollute recall).
+_CHAT_SKIP_DIRS = frozenset({"subagents", "workflows"})
+
+
 def backfill_chats(
     projects_dir: Path, store: Store, embedder: Embedder, *, force: bool = False
 ) -> IndexStats:
-    """Index every ``*.jsonl`` transcript under ``projects_dir`` (e.g. ``~/.claude/projects``)."""
+    """Index the main session transcripts under ``projects_dir`` (e.g. ``~/.claude/projects``).
+
+    Only top-level ``<project>/<session>.jsonl`` files — subagent/workflow sub-transcripts (under
+    ``subagents/`` or ``workflows/``) are skipped as internal machinery.
+    """
     stats = IndexStats()
     for jsonl in sorted(Path(projects_dir).rglob("*.jsonl")):
+        if _CHAT_SKIP_DIRS.intersection(jsonl.parts):
+            continue
         stats.files_scanned += 1
         try:
             _ingest_transcript(jsonl, store, embedder, force, stats)

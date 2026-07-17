@@ -155,6 +155,15 @@ qmx status                    # documents / chunks / mentions / live vs tombston
   you gave the project its own DB (`QMX_DB_PATH=~/.qmx/<name>.db`), just `rm ~/.qmx/<name>.db*`.
 - **Multiple codebases** — index several into one DB (they're distinguished by `path`), or keep one
   DB per project and switch with `QMX_DB_PATH`.
+- **Keep it all in sync with one command** — list the repos you want indexed in `code_roots`, then
+  `qmx refresh` re-indexes those **plus** chats and memory into the flat KB in a single pass:
+  ```toml
+  # ~/.qmx/config.toml
+  code_roots = ["~/GitHub/Cruise/xtorch", "~/GitHub/Cruise/cpe-intelligence-main"]
+  ```
+  ```bash
+  qmx refresh          # index code_roots + backfill-chats + index-memory (incremental)
+  ```
 
 ## 7. Chat memory — index past chats & capture new ones
 
