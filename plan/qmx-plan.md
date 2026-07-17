@@ -6,8 +6,10 @@
 
 - **Approach:** from-scratch **Python 3.12 / `uv`**, clean-room (not a qmd fork). Derived conceptually
   from `tobi/qmd` (MIT); no TS carried over.
-- **Model hosting:** **Ollama** serves all models over `localhost:11434`. qmx is a thin HTTP client —
-  no in-process model loading, no torch dependency.
+- **Model hosting:** **Ollama** serves all models. qmx is a thin HTTP client (`QMX_OLLAMA_URL`) —
+  no in-process model loading, no torch dependency. **Ollama runs on the DGX Spark** (GB10/CUDA),
+  not the Mac; the Mac dev client points at `spark-0e81.local:11434`. See
+  [qmx-deployment.md](./qmx-deployment.md) for the full Mac-dev / Spark-prod topology.
 - **Models — Qwen only** (one Apache-2.0 family):
   - `qwen3-embedding` — embeddings (vector search)
   - `qwen3-reranker` — final-stage reranking
@@ -48,7 +50,7 @@ as **display/citation metadata only** (so results show where they came from), no
                                                              │ HTTP :11434
                                         ┌────────────────────▼─────────────────────┐
                                         │ Ollama:  qwen3-embedding · qwen3-reranker  │
-                                        │          qwen3 (summarize)   (Metal/M4)    │
+                                        │       qwen3 (summarize)  (CUDA/GB10, Spark)│
                                         └────────────────────────────────────────────┘
 ```
 
@@ -202,8 +204,10 @@ Tools appear in Claude Code as `mcp__qmx__*`.
 ## Open questions (decide as we hit them)
 
 1. Chat capture: index **raw** turns, **summarized**, or both? (plan: raw now, distilled later)
-2. Index location: single global `~/.qmx/index.db` — assumed yes (flat KB, one DB)
-3. Exact Qwen sizes (0.6B vs 4B/8B embed; reranker size) — pick in Phase 0 by speed/quality on M4
+2. ~~Index location~~ **Decided:** single `~/.qmx/index.db` **on the DGX Spark** (flat KB, one DB,
+   GPU-adjacent) — see [qmx-deployment.md](./qmx-deployment.md).
+3. Exact Qwen sizes (0.6B vs 4B/8B embed; reranker size) — pick in Phase 0 by speed/quality **on the
+   Spark (GB10)**, the prod target.
 4. Relationship to `~/.claude/.../memory/`: keep curated layer + qmx as full-recall — assumed yes
 
 > **Decided:** no projects / collections / scoping — qmx is one flat knowledge base; queries search
