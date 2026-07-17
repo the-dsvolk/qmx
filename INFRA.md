@@ -1,0 +1,161 @@
+# qmx — Infrastructure Runbook
+
+How the running qmx deployment is wired: the **Ollama backend** on the DGX Spark (installed,
+persisted across reboots, and bound for LAN access) and the **qmx servers** (a resident one on the
+Spark, a local one on the Mac). This is the concrete "what's actually running"; the design rationale
+is in [`plan/qmx-deployment.md`](./plan/qmx-deployment.md).
+
+Everything on the Spark is installed **rootless** — it has no passwordless `sudo`, so no `apt`, no
+system services; user-space installs + `systemd --user` only.
+
+## Topology / ports
+
+| Host | Service | Bind | Purpose |
+|---|---|---|---|
+| Spark `spark-0e81.local` | Ollama | `0.0.0.0:11434` | Qwen embeddings (GPU); reachable on the LAN |
+| Spark | qmx MCP (resident) | `0.0.0.0:8765` | shared index served to any client |
+| Mac | qmx MCP (local) | `127.0.0.1:8765` | personal index (Architecture B) |
+
+LAN-only trust model: the `0.0.0.0` binds expose Ollama and the Spark MCP to the local network
+(mDNS `*.local`). Fine on a trusted LAN — do **not** do this on an untrusted network without a
+firewall/reverse proxy.
+
+---
+
+## Spark — one-time installs (rootless)
+
+- **uv** → `~/.local/bin/uv` (`curl -LsSf https://astral.sh/uv/install.sh | sh`).
+- **Ollama** → `~/.local/ollama/` from the GitHub release **arm64** asset (the `ollama.com/download`
+  `.tgz` URLs 404; assets are now `.tar.zst`):
+  ```bash
+  curl -fSL https://github.com/ollama/ollama/releases/download/v0.32.1/ollama-linux-arm64.tar.zst -o /tmp/o.tar.zst
+  mkdir -p ~/.local/ollama && tar --use-compress-program=unzstd -xf /tmp/o.tar.zst -C ~/.local/ollama
+  ```
+  Binary: `~/.local/ollama/bin/ollama`.
+- **GPU note (GB10):** the GB10 is CUDA compute **12.1 (sm_121)**. Ollama's bundled `cuda_v12`
+  runner *skips* it ("compute capability not in compiled architectures") but **`cuda_v13` supports
+  it** and Ollama 0.32.1 auto-selects it (≈118 GiB VRAM available). GPU inference works.
+- **Model:** `ollama pull qwen3-embedding:0.6b` — output **dim 1024** (matches qmx's `embed_dim`).
+
+## Spark — persist Ollama across reboots + bind for remote access
+
+Ollama runs as a **`systemd --user`** service, **bound to `0.0.0.0`** so the Mac can embed against
+it over the LAN (it was originally `127.0.0.1`, unreachable off-box).
+
+`~/.config/systemd/user/ollama.service`:
+
+```ini
+[Unit]
+Description=Ollama (Qwen models for qmx)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=OLLAMA_HOST=0.0.0.0:11434      # 0.0.0.0 -> reachable from the Mac; localhost still works
+ExecStart=%h/.local/ollama/bin/ollama serve
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+```
+
+Enable it, and enable **linger** so the user manager (and thus the service) starts at boot without a
+login — `enable-linger` works without sudo here:
+
+```bash
+loginctl enable-linger                       # user manager starts at boot; survives logout/reboot
+export XDG_RUNTIME_DIR=/run/user/$(id -u)    # needed for `systemctl --user` over SSH
+systemctl --user daemon-reload
+systemctl --user enable --now ollama.service
+curl -fsS http://localhost:11434/api/version # from the Spark
+# from the Mac: curl http://spark-0e81.local:11434/api/version
+```
+
+**Reboot survival = linger `yes` + unit `enabled` + `WantedBy=default.target`.** `Restart=on-failure`
+covers crashes.
+
+## Spark — resident qmx MCP server (shared index)
+
+Serves a shared index to any client on the LAN. Runs from the checked-out repo via `uv run`.
+
+`~/.config/qmx/env`:
+
+```ini
+QMX_OLLAMA_URL=http://localhost:11434
+QMX_EMBED_MODEL=qwen3-embedding:0.6b
+QMX_EMBED_DIM=1024
+QMX_DB_PATH=/home/dsvolk/.qmx/index.db
+QMX_MCP_HOST=0.0.0.0
+QMX_MCP_PORT=8765
+```
+
+`~/.config/systemd/user/qmx-mcp.service`:
+
+```ini
+[Unit]
+Description=qmx MCP server (resident)
+After=ollama.service network-online.target
+Wants=ollama.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/GitHub/the-dsvolk/qmx
+EnvironmentFile=%h/.config/qmx/env
+ExecStart=%h/.local/bin/uv run --project %h/GitHub/the-dsvolk/qmx qmx serve --transport http
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user enable --now qmx-mcp.service
+# MCP endpoint: http://spark-0e81.local:8765/mcp
+```
+
+The clone at `~/GitHub/the-dsvolk/qmx` tracks `main` (`git pull` + `uv sync` + `systemctl --user
+restart qmx-mcp` to update). Index built with `qmx index <path>` into `~/.qmx/index.db`.
+
+## Mac — local qmx (Architecture B: index local, embed on the Spark)
+
+- Install: `uv tool install "git+https://github.com/the-dsvolk/qmx"` → `~/.local/bin/qmx`.
+- Config `~/.qmx/config.toml`: `ollama_url = "http://spark-0e81.local:11434"`,
+  `embed_model = "qwen3-embedding:0.6b"`, `embed_dim = 1024`, `mcp_host = "127.0.0.1"`,
+  `mcp_port = 8765`. Index at `~/.qmx/index.db`.
+- Always-on server: launchd agent `~/Library/LaunchAgents/com.qmx.serve.plist` runs
+  `qmx serve --transport http` (`RunAtLoad` + `KeepAlive`; log `~/.qmx/serve.log`).
+- Claude Code: `claude mcp add --transport http --scope user qmx http://127.0.0.1:8765/mcp`.
+
+Full step-by-step is in [`QUICKSTART.md`](./QUICKSTART.md).
+
+---
+
+## Managing it
+
+**Spark (`systemd --user`)** — always `export XDG_RUNTIME_DIR=/run/user/$(id -u)` first over SSH:
+
+```bash
+systemctl --user status ollama qmx-mcp
+systemctl --user restart ollama            # or qmx-mcp
+journalctl --user -u qmx-mcp -f            # live request log (POST /mcp per tool call)
+journalctl --user -u ollama -n 50
+loginctl show-user "$USER" -p Linger       # expect Linger=yes
+```
+
+**Mac (launchd):**
+
+```bash
+launchctl list | grep qmx
+launchctl unload ~/Library/LaunchAgents/com.qmx.serve.plist   # stop
+launchctl load  -w ~/Library/LaunchAgents/com.qmx.serve.plist # start / enable at login
+tail -f ~/.qmx/serve.log
+```
+
+## Rebuilding from scratch
+
+The index is a **rebuildable shadow** — safe to delete. If the DB is corrupt or the embedding
+model/dim changes: `rm ~/.qmx/index.db*` then re-`qmx index`. Nothing else needs re-doing; the
+services and config above are the only durable state.

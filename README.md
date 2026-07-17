@@ -10,6 +10,9 @@ Powered by the [Qwen](https://github.com/QwenLM) embedding/rerank models and
 [`sqlite-vec`](https://github.com/asg017/sqlite-vec). Derived from
 [`tobi/qmd`](https://github.com/tobi/qmd) (MIT).
 
+**Start here:** [QUICKSTART.md](./QUICKSTART.md) (install → index → use from Claude Code) ·
+[INFRA.md](./INFRA.md) (the Ollama backend + services) · [plan/](./plan) (design).
+
 ## Why
 
 - **Find by meaning, not grep** — "where's the launcher logic" instead of guessing symbol names.
