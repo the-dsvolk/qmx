@@ -96,9 +96,29 @@ flowchart LR
 ```
 
 Choose where the backend lives with `QMX_OLLAMA_URL` and which model embeds with `embed_model`
-(see [QUICKSTART.md](./QUICKSTART.md)). An optional **rerank** stage after RRF sharpens the top-k:
-set `rerank_url` to a cross-encoder server (**Qwen3-Reranker via llama.cpp `--reranking`** on the
-Spark GPU) — off by default, fails soft to RRF (see [plan/qmx-ml-notes.md](./plan/qmx-ml-notes.md)).
+(see [QUICKSTART.md](./QUICKSTART.md)).
+
+**Reranking (optional)** — when `rerank_url` is set, the RRF top candidates are re-scored by a
+cross-encoder (**Qwen3-Reranker** via llama.cpp `--reranking` on the Spark GPU) and trimmed to `k`.
+Off by default; if the rerank server is unreachable it **fails soft** back to RRF order:
+
+```mermaid
+flowchart LR
+  subgraph M["your machine — qmx"]
+    RRF["vector + BM25 → RRF"]
+    POOL["top-N candidates<br/>(rerank_pool, default 40)"]
+    TOPK["reordered top-k<br/>(cross-encoder scores)"]
+    RRF --> POOL
+  end
+  subgraph B["Spark · GPU"]
+    RR["llama-server --reranking<br/>Qwen3-Reranker (llama.cpp)"]
+  end
+  POOL -- "query + candidate texts" --> RR
+  RR -- "relevance scores" --> TOPK
+  POOL -. "server down → keep RRF order" .-> TOPK
+```
+
+See [plan/qmx-ml-notes.md](./plan/qmx-ml-notes.md) (TD-1) for how the reranker is built and served.
 
 ## Status
 
