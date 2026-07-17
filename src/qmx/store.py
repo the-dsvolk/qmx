@@ -8,6 +8,7 @@ cosine top-k vector search — enough for the round-trip acceptance test.
 from __future__ import annotations
 
 import hashlib
+import re
 import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -15,7 +16,7 @@ from pathlib import Path
 
 import sqlite_vec
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class StoreSchemaMismatch(RuntimeError):
@@ -141,8 +142,9 @@ class Store:
             "chunk_id INTEGER PRIMARY KEY, "
             f"embedding float[{self._embed_dim}] distance_metric=cosine)"
         )
-        # FTS5 over chunk text for Phase 1 BM25 (kept consistent from Phase 0 onward).
-        c.execute("CREATE VIRTUAL TABLE fts_chunks USING fts5(text, content='')")
+        # FTS5 over chunk text for BM25. Plain (not contentless) so rows can be DELETEd on
+        # re-index; external-content + triggers is a Phase 2 space optimization.
+        c.execute("CREATE VIRTUAL TABLE fts_chunks USING fts5(text)")
         c.execute("INSERT INTO meta(key, value) VALUES('embed_dim', ?)", (str(self._embed_dim),))
         c.execute("INSERT INTO meta(key, value) VALUES('embed_model', ?)", (self._embed_model,))
 
@@ -181,6 +183,13 @@ class Store:
         doc_id = cur.fetchone()[0]
         self._conn.commit()
         return doc_id
+
+    def document_hash(self, kind: str, path: str) -> str | None:
+        """The stored ``file_hash`` for a document, or ``None`` if not indexed yet."""
+        row = self._conn.execute(
+            "SELECT file_hash FROM documents WHERE kind=? AND path=?", (kind, path)
+        ).fetchone()
+        return row[0] if row is not None else None
 
     def add_chunks(
         self, doc_id: int, chunks: Sequence[Chunk], embeddings: Sequence[Sequence[float]]
@@ -228,6 +237,28 @@ class Store:
                 ids.append(chunk_id)
         return ids
 
+    def clear_document_chunks(self, doc_id: int) -> int:
+        """Remove all chunks (and their vec/fts rows) for a document; returns the count removed.
+
+        Used to re-index a changed file wholesale. NOTE: with the Phase 0 global-unique dedup a
+        chunk lives under a single ``doc_id``; a chunk whose identical text also appears in another
+        file is dropped here. The proper chunk<->document link table is Phase 2 robustness work.
+        """
+        ids = [
+            r[0]
+            for r in self._conn.execute(
+                "SELECT chunk_id FROM chunks WHERE doc_id=?", (doc_id,)
+            ).fetchall()
+        ]
+        if not ids:
+            return 0
+        with self._conn:
+            for cid in ids:
+                self._conn.execute("DELETE FROM vec_chunks WHERE chunk_id=?", (cid,))
+                self._conn.execute("DELETE FROM fts_chunks WHERE rowid=?", (cid,))
+            self._conn.execute("DELETE FROM chunks WHERE doc_id=?", (doc_id,))
+        return len(ids)
+
     # -- reads ---------------------------------------------------------------------------------
 
     def search_vec(
@@ -267,6 +298,46 @@ class Store:
         ]
         return hits[:k]
 
+    def search_fts(self, query: str, k: int = 10, kind: str | None = None) -> list[SearchHit]:
+        """BM25 top-k over live chunks via FTS5, optionally filtered by ``kind``.
+
+        ``distance`` carries the FTS5 ``rank`` (more negative = better); callers that fuse rankings
+        (see ``search.py``) use position, not the raw value.
+        """
+        match = _fts_match_query(query)
+        if match is None:
+            return []
+        fetch = k * 5 if kind is not None else k
+        rows = self._conn.execute(
+            """
+            SELECT f.rowid AS chunk_id, f.rank AS rank, c.doc_id, c.text,
+                   c.start_line, c.end_line, c.symbol, d.kind, d.path
+            FROM fts_chunks f
+            JOIN chunks c ON c.chunk_id = f.rowid
+            JOIN documents d ON d.doc_id = c.doc_id
+            WHERE fts_chunks MATCH ? AND c.tombstoned = 0
+            ORDER BY f.rank
+            LIMIT ?
+            """,
+            (match, fetch),
+        ).fetchall()
+        hits = [
+            SearchHit(
+                chunk_id=r["chunk_id"],
+                doc_id=r["doc_id"],
+                kind=r["kind"],
+                path=r["path"],
+                text=r["text"],
+                distance=r["rank"],
+                start_line=r["start_line"],
+                end_line=r["end_line"],
+                symbol=r["symbol"],
+            )
+            for r in rows
+            if kind is None or r["kind"] == kind
+        ]
+        return hits[:k]
+
     def counts(self) -> dict[str, int]:
         """Row counts for ``status`` / smoke tests."""
         q = lambda t: self._conn.execute(f"SELECT count(*) FROM {t}").fetchone()[0]  # noqa: E731
@@ -275,6 +346,21 @@ class Store:
             "chunks": q("chunks"),
             "vectors": q("vec_chunks"),
         }
+
+
+_FTS_TOKEN = re.compile(r"[A-Za-z0-9_]+")
+
+
+def _fts_match_query(text: str) -> str | None:
+    """Turn free text into a safe FTS5 MATCH expression: OR of quoted alnum tokens.
+
+    Quoting each token neutralises FTS5 operators/syntax in user input; ``None`` when there is
+    nothing to match.
+    """
+    tokens = _FTS_TOKEN.findall(text)
+    if not tokens:
+        return None
+    return " OR ".join(f'"{t}"' for t in tokens)
 
 
 def _load_sqlite_vec(conn: sqlite3.Connection) -> None:

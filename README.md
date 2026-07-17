@@ -18,8 +18,9 @@ Powered by the [Qwen](https://github.com/QwenLM) embedding/rerank models and
 
 ## Status
 
-Phase 0 (foundation) landing: config seam, Ollama embed client, and the `sqlite-vec` + FTS5 store
-with cosine top-k. See [`plan/`](./plan) for the full design and phasing.
+Phase 1 (code search) landing: on top of the Phase 0 store/embed foundation, qmx now does
+tree-sitter code chunking, incremental indexing, and hybrid **vector + BM25 → RRF** search via
+`qmx index` / `qmx query`. See [`plan/`](./plan) for the full design and phasing.
 
 ## Development
 
@@ -32,8 +33,13 @@ uv run pytest                   # unit tests (live-Ollama tests skip when unreac
 uv run ruff check . && uv run ruff format --check .
 uv run qmx status               # resolved config + index stats
 
+# index code and search it (needs a running Ollama backend):
+export QMX_OLLAMA_URL=http://spark-0e81.local:11434
+uv run qmx index ~/some/repo
+uv run qmx query "where is the retry logic" -k 5
+
 # run the live embed round-trip against the Spark:
-QMX_OLLAMA_URL=http://spark-0e81.local:11434 uv run pytest -m integration
+uv run pytest -m integration
 ```
 
 ## License
