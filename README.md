@@ -18,9 +18,10 @@ Powered by the [Qwen](https://github.com/QwenLM) embedding/rerank models and
 
 ## Status
 
-Phase 1 (code search) landing: on top of the Phase 0 store/embed foundation, qmx now does
-tree-sitter code chunking, incremental indexing, and hybrid **vector + BM25 → RRF** search via
-`qmx index` / `qmx query`. See [`plan/`](./plan) for the full design and phasing.
+Phase 2 (robustness core) landing: tree-sitter code chunking + hybrid **vector + BM25 → RRF**
+search, now with **incremental reindex** (only changed chunks re-embed), **cross-file dedup**,
+**tombstone deletes**, and a **filesystem watcher** — via `qmx index` / `query` / `watch` / `gc`.
+See [`plan/`](./plan) for the full design and phasing.
 
 ## Development
 
@@ -37,6 +38,8 @@ uv run qmx status               # resolved config + index stats
 export QMX_OLLAMA_URL=http://spark-0e81.local:11434
 uv run qmx index ~/some/repo
 uv run qmx query "where is the retry logic" -k 5
+uv run qmx watch ~/some/repo    # keep the index live as files change
+uv run qmx gc                   # purge tombstoned chunks
 
 # run the live embed round-trip against the Spark:
 uv run pytest -m integration

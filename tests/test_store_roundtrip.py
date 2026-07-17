@@ -1,9 +1,10 @@
-"""Phase 0 acceptance: embed 3 strings, store, cosine top-k returns them."""
+"""Store round-trip: embed strings, store, cosine top-k returns them (Phase 0 acceptance)."""
 
 from __future__ import annotations
 
 import pytest
 
+from qmx.index import reindex
 from qmx.store import Chunk, Store, StoreSchemaMismatch
 from tests.fakes import FakeEmbedder
 
@@ -25,7 +26,7 @@ def test_roundtrip_topk_returns_the_stored_string(store):
     s, embedder = store
     doc_id = s.upsert_document(kind="code", path="sample.py")
     chunks = [Chunk(text=t, ord=i) for i, t in enumerate(TEXTS)]
-    s.add_chunks(doc_id, chunks, embedder.embed(TEXTS))
+    reindex(s, embedder, doc_id, chunks)
 
     assert s.counts() == {"documents": 1, "chunks": 3, "vectors": 3}
 
@@ -41,22 +42,19 @@ def test_roundtrip_topk_returns_the_stored_string(store):
 def test_dedup_identical_chunk_embeds_once(store):
     s, embedder = store
     doc_id = s.upsert_document(kind="code", path="dup.py")
-    dup = [Chunk(text="same text"), Chunk(text="same text")]
-    ids = s.add_chunks(doc_id, dup, embedder.embed([c.text for c in dup]))
-    assert ids[0] == ids[1]
+    result = reindex(s, embedder, doc_id, [Chunk(text="same text"), Chunk(text="same text")])
+    assert result.embedded == 1  # one unique content chunk, embedded once
+    assert result.mentions == 2  # but referenced twice
     assert s.counts()["chunks"] == 1
+    assert s.index_stats()["mentions"] == 2
 
 
 def test_kind_filter(store):
     s, embedder = store
     code_doc = s.upsert_document(kind="code", path="a.py")
     chat_doc = s.upsert_document(kind="chat", path="b.md")
-    s.add_chunks(
-        code_doc, [Chunk(text="vector search in code")], embedder.embed(["vector search in code"])
-    )
-    s.add_chunks(
-        chat_doc, [Chunk(text="vector search in chat")], embedder.embed(["vector search in chat"])
-    )
+    reindex(s, embedder, code_doc, [Chunk(text="vector search in code")])
+    reindex(s, embedder, chat_doc, [Chunk(text="vector search in chat")])
 
     [qvec] = embedder.embed(["vector search"])
     chat_hits = s.search_vec(qvec, k=5, kind="chat")
