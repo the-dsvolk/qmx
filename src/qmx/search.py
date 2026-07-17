@@ -1,16 +1,20 @@
 """Hybrid search: vector (cosine) + BM25, fused with Reciprocal Rank Fusion.
 
-Phase 1 delivers vector + BM25 -> RRF. The optional Qwen3-Reranker re-orders the fused top-k in
-Phase 3 (``plan/qmx-plan.md``); the ``rerank`` seam is left for it.
+Ranking is RRF over the vector and BM25 arms. An optional :class:`~qmx.rerank.Reranker` can reorder
+the fused top-k; Phase 3 ships no reranker (RRF-only) — see ``plan/qmx-ml-notes.md`` TD-1.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from qmx.embed import Embedder
 from qmx.store import SearchHit, Store
+
+if TYPE_CHECKING:
+    from qmx.rerank import Reranker
 
 RRF_K = 60  # standard RRF damping constant
 
@@ -39,10 +43,13 @@ def search(
     k: int = 10,
     kind: str | None = None,
     pool: int | None = None,
+    reranker: Reranker | None = None,
 ) -> list[RankedHit]:
     """Run vector + BM25 over ``store`` and return the RRF-fused top-``k``.
 
     ``pool`` is how many candidates each arm contributes before fusion (default ``max(4k, 20)``).
+    If a ``reranker`` is given it reorders the fused top-``k`` (Phase 3 default: none -> RRF order;
+    see ``plan/qmx-ml-notes.md`` TD-1).
     """
     pool = pool or max(4 * k, 20)
     [query_vec] = embedder.embed([query])
@@ -56,4 +63,5 @@ def search(
 
     fused = reciprocal_rank_fusion([[h.chunk_id for h in vec_hits], [h.chunk_id for h in fts_hits]])
     ranked = sorted(fused.items(), key=lambda kv: kv[1], reverse=True)[:k]
-    return [RankedHit(hit=by_id[cid], score=score) for cid, score in ranked]
+    hits = [RankedHit(hit=by_id[cid], score=score) for cid, score in ranked]
+    return reranker.rerank(query, hits) if reranker is not None else hits

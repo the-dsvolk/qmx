@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from pathlib import Path
 
 # Drop punctuation-glued tokens down to word cores, and ignore very common/short words so that
 # cosine overlap reflects *content* words — a crude but realistic stand-in for real preprocessing.
@@ -43,3 +44,25 @@ class FakeEmbedder:
         if not any(v):  # nothing content-bearing -> a fixed non-zero vector (cosine needs non-zero)
             v[0] = 1.0
         return v
+
+
+def build_index(tmp_path: Path, embedder: FakeEmbedder, files: dict[str, str]):
+    """Write ``files`` under ``tmp_path``, index them, and return a Settings pointing at the DB.
+
+    ``ollama_url`` is a dead port so ``QmxService`` health checks resolve to False.
+    """
+    from qmx.config import Settings
+    from qmx.index import index_paths
+    from qmx.store import Store
+
+    for name, content in files.items():
+        (tmp_path / name).write_text(content)
+    db = tmp_path / "index.db"
+    with Store.open(db, embedder.dim, "fake") as store:
+        index_paths([tmp_path], store, embedder)
+    return Settings(
+        db_path=db,
+        embed_dim=embedder.dim,
+        embed_model="fake",
+        ollama_url="http://127.0.0.1:9",
+    )

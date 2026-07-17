@@ -197,7 +197,7 @@ Tools appear in Claude Code as `mcp__qmx__*`.
 | **0** | `store.py` schema + migrations; `config.py`; `embed.py` Ollama client | round-trip: embed 3 strings, store, cosine top-k returns them |
 | **1** | Code vertical slice: `chunk/code.py` + `index.py` + `search.py` + `qmx query` | index a local repo; a known function is returned in top-5 for a by-meaning query |
 | **2** | **Robustness core**: incremental reindex, dedup, tombstones, `watch.py` | edit 1 file → only its chunks re-embed; delete file → chunks gone; unchanged run = ~0 embeds |
-| **3** | Qwen3-Reranker stage + resident `mcp_server.py` + Claude Code wiring | MCP `query` callable from Claude Code; rerank improves top-5 ordering |
+| **3** | Resident `mcp_server.py` + Claude Code wiring (rerank **deferred** — see [ml-notes TD-1](./qmx-ml-notes.md)) | MCP `query` callable from Claude Code |
 | **4** | **Chats**: `chunk/chat.py`, `qmx backfill-chats`, Stop-hook `capture.py` | 86 transcripts searchable; a new turn is queryable within seconds |
 | **5** | Hardening: backend-down, concurrency, huge files, retries + benchmarks | kill Ollama mid-index → resumes cleanly; index+query concurrently; perf numbers recorded |
 

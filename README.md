@@ -18,10 +18,11 @@ Powered by the [Qwen](https://github.com/QwenLM) embedding/rerank models and
 
 ## Status
 
-Phase 2 (robustness core) landing: tree-sitter code chunking + hybrid **vector + BM25 → RRF**
-search, now with **incremental reindex** (only changed chunks re-embed), **cross-file dedup**,
-**tombstone deletes**, and a **filesystem watcher** — via `qmx index` / `query` / `watch` / `gc`.
-See [`plan/`](./plan) for the full design and phasing.
+Phase 3 (MCP server) landing: qmx now runs as a resident **MCP server** exposing
+`query` / `search_code` / `get` / `status` to Claude Code, on top of tree-sitter chunking,
+incremental indexing, and hybrid **vector + BM25 → RRF** search (`index` / `query` / `watch` / `gc`).
+Reranking is deferred (RRF-only) — Ollama has no rerank endpoint; see
+[`plan/qmx-ml-notes.md`](./plan/qmx-ml-notes.md). See [`plan/`](./plan) for the full design.
 
 ## Development
 
@@ -44,6 +45,30 @@ uv run qmx gc                   # purge tombstoned chunks
 # run the live embed round-trip against the Spark:
 uv run pytest -m integration
 ```
+
+## Use from Claude Code (MCP)
+
+Run the resident server (on the Spark in prod; it owns the index + background loops):
+
+```bash
+uv run qmx serve                       # HTTP on 127.0.0.1:8765/mcp by default
+QMX_MCP_HOST=0.0.0.0 uv run qmx serve  # bind to the LAN so other machines can reach it
+```
+
+Register it with Claude Code — either the CLI:
+
+```bash
+claude mcp add --transport http qmx http://spark-0e81.local:8765/mcp
+```
+
+…or in `settings.json`:
+
+```json
+{ "mcpServers": { "qmx": { "type": "http", "url": "http://spark-0e81.local:8765/mcp" } } }
+```
+
+The tools then appear as `mcp__qmx__query`, `mcp__qmx__search_code`, `mcp__qmx__get`,
+`mcp__qmx__status`. (`qmx serve --transport stdio` is available for a local, single-client setup.)
 
 ## License
 

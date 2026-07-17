@@ -362,6 +362,23 @@ class Store:
 
     # -- reads ---------------------------------------------------------------------------------
 
+    def get_chunk(self, chunk_id: int) -> SearchHit | None:
+        """Fetch one live chunk's full text + representative location, or ``None`` if gone."""
+        row = self._conn.execute(
+            f"""
+            SELECT c.chunk_id, 0.0 AS distance, c.text,
+                   m.doc_id, m.start_line, m.end_line, m.symbol, d.kind, d.path
+            FROM chunks c
+            JOIN mentions m ON m.mention_id = {_REP_MENTION}
+            JOIN documents d ON d.doc_id = m.doc_id
+            WHERE c.chunk_id = ?
+            """,
+            (chunk_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return _rows_to_hits([row], 1, None, distance_key="distance")[0]
+
     def search_vec(
         self, query_embedding: Sequence[float], k: int = 10, kind: str | None = None
     ) -> list[SearchHit]:
