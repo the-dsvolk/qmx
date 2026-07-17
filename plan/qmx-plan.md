@@ -18,16 +18,18 @@
 
 ## Scope: code AND chats are both first-class
 
-qmx indexes two domains into **one** index, tagged so queries can scope to either or both:
+qmx is a **single, flat knowledge base** — one index over everything, no project/collection
+scoping. Two domains flow into it:
 
-1. **Code** — your local source repos (a multi-repo workspace to start with). AST-aware chunking via
-   tree-sitter.
+1. **Code** — your local source repos. AST-aware chunking via tree-sitter.
 2. **Chats** — Claude Code conversation history:
    - **Backfill:** the ~86 existing `~/.claude/projects/*/*.jsonl` transcripts (one-time import).
    - **On-the-fly:** a Claude Code **Stop hook** captures each new turn live and indexes it.
 
-Every indexed document carries `kind` (`code` | `doc` | `chat`), `repo`/`project`, and `path` so a
-query can target "repo X's code", "all chats", "this project's chats", etc.
+Queries search the **whole** knowledge base by default. The only distinction we keep is a lightweight
+`kind` tag (`code` | `doc` | `chat` | `learning`) — an optional filter so the three capabilities can
+route (code search vs memory recall vs learnings), not a scoping boundary. `repo`/`path` are retained
+as **display/citation metadata only** (so results show where they came from), not for scoping.
 
 ## Architecture
 
@@ -159,10 +161,13 @@ door); the Stop hook is the *write* door.
 ## Open questions (decide as we hit them)
 
 1. Chat capture: index **raw** turns, **summarized**, or both? (plan: raw now, distilled later)
-2. Chat scope: this project only vs **all** `~/.claude/projects/*` (plan: all, tagged by project)
-3. Index location: `~/.qmx/index.db` (global, cross-repo) — assumed yes
-4. Exact Qwen sizes (0.6B vs 4B/8B embed; reranker size) — pick in Phase 0 by speed/quality on M4
-5. Relationship to `~/.claude/.../memory/`: keep curated layer + qmx as full-recall — assumed yes
+2. Index location: single global `~/.qmx/index.db` — assumed yes (flat KB, one DB)
+3. Exact Qwen sizes (0.6B vs 4B/8B embed; reranker size) — pick in Phase 0 by speed/quality on M4
+4. Relationship to `~/.claude/.../memory/`: keep curated layer + qmx as full-recall — assumed yes
+
+> **Decided:** no projects / collections / scoping — qmx is one flat knowledge base; queries search
+> everything, with `kind` as an optional routing filter only. All chats from `~/.claude/projects/*`
+> are indexed into the one KB.
 
 ## References
 
