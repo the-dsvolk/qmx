@@ -26,11 +26,13 @@ For how the backend (Ollama on the Spark) is set up and kept alive, see [`INFRA.
 ## 2. Install the CLI
 
 ```bash
-uv tool install "git+https://github.com/the-dsvolk/qmx"
+uv tool install "git+https://github.com/the-dsvolk/qmx"   # install
+uv tool upgrade qmx                                        # update to the latest main later
 qmx --help
 ```
 
-Update later with `uv tool upgrade qmx`.
+`uv tool upgrade qmx` pulls the newest `main` and rebuilds the isolated tool env — run it after new
+features land (e.g. chat memory) to refresh the `qmx` command.
 
 ## 3. Configure (point at the embedding backend)
 
