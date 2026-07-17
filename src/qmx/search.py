@@ -44,12 +44,13 @@ def search(
     kind: str | None = None,
     pool: int | None = None,
     reranker: Reranker | None = None,
+    rerank_pool: int = 40,
 ) -> list[RankedHit]:
     """Run vector + BM25 over ``store`` and return the RRF-fused top-``k``.
 
     ``pool`` is how many candidates each arm contributes before fusion (default ``max(4k, 20)``).
-    If a ``reranker`` is given it reorders the fused top-``k`` (Phase 3 default: none -> RRF order;
-    see ``plan/qmx-ml-notes.md`` TD-1).
+    If a ``reranker`` is given, the RRF top ``rerank_pool`` candidates are reranked and trimmed to
+    ``k``; otherwise the RRF top-``k`` is returned (see ``plan/qmx-ml-notes.md`` TD-1).
     """
     pool = pool or max(4 * k, 20)
     [query_vec] = embedder.embed([query])
@@ -62,6 +63,10 @@ def search(
         by_id.setdefault(h.chunk_id, h)
 
     fused = reciprocal_rank_fusion([[h.chunk_id for h in vec_hits], [h.chunk_id for h in fts_hits]])
-    ranked = sorted(fused.items(), key=lambda kv: kv[1], reverse=True)[:k]
-    hits = [RankedHit(hit=by_id[cid], score=score) for cid, score in ranked]
-    return reranker.rerank(query, hits) if reranker is not None else hits
+    ranked = sorted(fused.items(), key=lambda kv: kv[1], reverse=True)
+    # Rerank a wider candidate pool (then trim to k); without a reranker, RRF top-k is final.
+    take = max(k, rerank_pool) if reranker is not None else k
+    hits = [RankedHit(hit=by_id[cid], score=score) for cid, score in ranked[:take]]
+    if reranker is not None:
+        hits = reranker.rerank(query, hits)
+    return hits[:k]

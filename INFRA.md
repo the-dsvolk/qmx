@@ -119,6 +119,26 @@ systemctl --user enable --now qmx-mcp.service
 The clone at `~/GitHub/the-dsvolk/qmx` tracks `main` (`git pull` + `uv sync` + `systemctl --user
 restart qmx-mcp` to update). Index built with `qmx index <path>` into `~/.qmx/index.db`.
 
+## Spark — reranker server (`qmx-rerank.service`, GPU)
+
+A cross-encoder reranker: **llama.cpp `llama-server --reranking`** serving **Qwen3-Reranker-0.6B**
+on the GB10. Built from source (no prebuilt arm64/Blackwell image exists):
+
+```bash
+export PATH=/usr/local/cuda-13.0/bin:$PATH CUDACXX=/usr/local/cuda-13.0/bin/nvcc
+git clone --depth 1 https://github.com/ggml-org/llama.cpp.git ~/llama.cpp && cd ~/llama.cpp
+cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=121 -DLLAMA_CURL=OFF
+cmake --build build --config Release -j
+uvx --from "huggingface_hub[cli]" hf download ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF \
+  qwen3-reranker-0.6b-q8_0.gguf --local-dir ~/models
+```
+
+`~/.config/systemd/user/qmx-rerank.service` → `llama-server --model ~/models/qwen3-reranker-0.6b-q8_0.gguf
+--reranking --host 0.0.0.0 --port 8081 -ngl 99 -b 8192 -ub 8192`
+(`Environment=LD_LIBRARY_PATH=/usr/local/cuda-13.0/lib64:%h/llama.cpp/build/bin`).
+`-b/-ub 8192` is required — the default 512 rejects long chunks (HTTP 500). Endpoint:
+`http://spark-0e81.local:8081/v1/rerank`. Clients enable it with `rerank_url` (off by default).
+
 ## Mac — local qmx (Architecture B: index local, embed on the Spark)
 
 - Install: `uv tool install "git+https://github.com/the-dsvolk/qmx"` → `~/.local/bin/qmx`.
