@@ -17,6 +17,7 @@ from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from qmx.chunk.chat import chunk_chat
 from qmx.chunk.code import chunk_code, language_for_path
 from qmx.embed import Embedder
 from qmx.store import Chunk, ReindexResult, Store, hash_text
@@ -143,3 +144,63 @@ def _prune_deleted(root: Path, seen: set[str], store: Store, stats: IndexStats) 
             stats.chunks_orphaned += store.remove_document_by_id(doc_id)
             stats.files_removed += 1
             log.info("removed deleted file %s", path)
+
+
+# -- chats (kind="chat") -----------------------------------------------------------------------
+
+
+def index_transcript(
+    path: Path, store: Store, embedder: Embedder, *, force: bool = False
+) -> IndexStats:
+    """Index one Claude Code JSONL transcript as ``kind='chat'`` (used by backfill + capture).
+
+    Cheap on re-runs: the whole transcript is re-chunked, but the per-chunk dedup means only *new*
+    turns embed — so the Stop hook re-indexing a growing file only pays for the latest turn(s).
+    """
+    stats = IndexStats()
+    stats.files_scanned += 1
+    _ingest_transcript(Path(path), store, embedder, force, stats)
+    return stats
+
+
+def backfill_chats(
+    projects_dir: Path, store: Store, embedder: Embedder, *, force: bool = False
+) -> IndexStats:
+    """Index every ``*.jsonl`` transcript under ``projects_dir`` (e.g. ``~/.claude/projects``)."""
+    stats = IndexStats()
+    for jsonl in sorted(Path(projects_dir).rglob("*.jsonl")):
+        stats.files_scanned += 1
+        try:
+            _ingest_transcript(jsonl, store, embedder, force, stats)
+        except OSError as exc:
+            stats.errors.append(f"{jsonl}: {exc}")
+            log.warning("skip %s: %s", jsonl, exc)
+    return stats
+
+
+def _ingest_transcript(
+    path: Path, store: Store, embedder: Embedder, force: bool, stats: IndexStats
+) -> None:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    path_key = str(path.resolve())
+    file_hash = hash_text(text)
+    if not force and store.document_hash("chat", path_key) == file_hash:
+        stats.files_skipped += 1
+        return
+
+    chunks = chunk_chat(text)
+    new_embeddings = embed_missing(store, embedder, chunks)  # embed before any DB write
+    doc_id = store.upsert_document(
+        kind="chat",
+        path=path_key,
+        repo=path.parent.name,
+        mtime=path.stat().st_mtime,
+        file_hash=file_hash,
+    )
+    result = store.reindex_document(doc_id, chunks, new_embeddings)
+
+    stats.files_indexed += 1
+    stats.chunks_added += result.mentions
+    stats.chunks_embedded += result.embedded
+    stats.chunks_reused += result.reused
+    stats.chunks_orphaned += result.orphaned

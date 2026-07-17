@@ -35,6 +35,12 @@ class QmxService:
             results = search(store, self._embedder, text, k=k, kind=kind)
             return [_hit_dict(r.hit, score=r.score) for r in results]
 
+    def recall(self, text: str, k: int = 5) -> list[dict]:
+        """Search **chat** memory only (``kind='chat'``) — past Claude Code conversation turns."""
+        with self._store() as store:
+            results = search(store, self._embedder, text, k=k, kind="chat")
+            return [_hit_dict(r.hit, score=r.score) for r in results]
+
     def get(self, chunk_id: int) -> dict | None:
         """Full text + location for one chunk, or ``None`` if it is gone/tombstoned."""
         with self._store() as store:

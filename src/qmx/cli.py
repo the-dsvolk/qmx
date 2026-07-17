@@ -1,7 +1,7 @@
 """qmx CLI — thin admin surface over the store/embed/index/search layers.
 
-Ships ``status`` / ``index`` / ``query`` plus ``watch`` and ``gc`` (Phase 2). Later phases add
-``serve``, ``backfill-chats``, and ``capture`` per ``plan/qmx-plan.md``.
+Ships ``status`` / ``index`` / ``query`` / ``watch`` / ``sources`` / ``remove`` / ``gc`` /
+``serve``, plus ``backfill-chats`` and ``capture`` (chat memory) per ``plan/qmx-plan.md``.
 """
 
 from __future__ import annotations
@@ -12,12 +12,15 @@ import logging
 import sys
 from pathlib import Path
 
+from qmx.capture import capture
 from qmx.config import Settings
 from qmx.embed import EmbedBackendError, OllamaEmbedder
-from qmx.index import index_paths
+from qmx.index import backfill_chats, index_paths
 from qmx.search import search
 from qmx.store import Store, StoreSchemaMismatch
 from qmx.watch import watch
+
+DEFAULT_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 
 
 def _open_store(settings: Settings) -> Store:
@@ -56,6 +59,32 @@ def _cmd_index(settings: Settings, args: argparse.Namespace) -> int:
     for err in stats.errors:
         print(f"  ! {err}", file=sys.stderr)
     return 0
+
+
+def _cmd_backfill_chats(settings: Settings, args: argparse.Namespace) -> int:
+    projects = Path(args.projects) if args.projects else DEFAULT_PROJECTS_DIR
+    if not projects.exists():
+        print(f"no such projects dir: {projects}", file=sys.stderr)
+        return 2
+    try:
+        with _open_store(settings) as store, OllamaEmbedder(settings) as embedder:
+            stats = backfill_chats(projects, store, embedder, force=args.force)
+    except (StoreSchemaMismatch, EmbedBackendError) as exc:
+        print(f"backfill-chats failed: {exc}", file=sys.stderr)
+        return 1
+    print(
+        f"indexed {stats.files_indexed} transcript(s): {stats.chunks_embedded} turns embedded, "
+        f"{stats.chunks_reused} reused; skipped {stats.files_skipped}, "
+        f"scanned {stats.files_scanned}"
+    )
+    for err in stats.errors:
+        print(f"  ! {err}", file=sys.stderr)
+    return 0
+
+
+def _cmd_capture(settings: Settings, args: argparse.Namespace) -> int:
+    # Stop-hook entrypoint: hook JSON arrives on stdin. Best-effort; never fails a turn.
+    return capture(sys.stdin.read(), settings)
 
 
 def _cmd_watch(settings: Settings, args: argparse.Namespace) -> int:
@@ -168,6 +197,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_index.add_argument("paths", nargs="+", help="files or directories to index")
     p_index.add_argument("--force", action="store_true", help="re-index unchanged files too")
 
+    p_bf = sub.add_parser("backfill-chats", help="index existing Claude Code transcripts")
+    p_bf.add_argument(
+        "--projects", default=None, help="transcripts dir (default ~/.claude/projects)"
+    )
+    p_bf.add_argument("--force", action="store_true", help="re-index unchanged transcripts too")
+
+    sub.add_parser("capture", help="Stop-hook entrypoint: index the transcript named on stdin")
+
     p_query = sub.add_parser("query", help="hybrid (vector + BM25) search")
     p_query.add_argument("text", help="the query text")
     p_query.add_argument("-k", type=int, default=5, help="number of results (default 5)")
@@ -196,6 +233,8 @@ def build_parser() -> argparse.ArgumentParser:
 _COMMANDS = {
     "status": _cmd_status,
     "index": _cmd_index,
+    "backfill-chats": _cmd_backfill_chats,
+    "capture": _cmd_capture,
     "query": _cmd_query,
     "watch": _cmd_watch,
     "sources": _cmd_sources,
