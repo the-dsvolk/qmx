@@ -96,6 +96,9 @@ class Store:
         _load_sqlite_vec(conn)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
+        # Wait (not error) when another writer holds the lock — watch + capture + refresh can all
+        # write the flat KB concurrently (WAL allows one writer at a time).
+        conn.execute("PRAGMA busy_timeout=5000")
         store = cls(conn, embed_dim, embed_model)
         store._migrate()
         return store

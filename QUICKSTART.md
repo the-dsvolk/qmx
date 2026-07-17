@@ -143,6 +143,7 @@ Ask something like *"use qmx to find the rate-limiter"* (`recall` searches past 
 
 ```bash
 qmx watch ~/code/my-project   # reindex on save (create/modify/delete)
+qmx watch                     # no args → watch everything in code_roots
 qmx index ~/code/my-project   # re-index on demand (incremental; --force to re-embed all)
 
 qmx sources                   # list what's indexed (grouped by repo + counts)

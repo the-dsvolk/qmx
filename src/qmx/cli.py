@@ -131,8 +131,17 @@ def _cmd_index_memory(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def _watch_targets(settings: Settings, arg_paths: list[str]) -> list[Path]:
+    """Paths to watch: the CLI args, or the configured ``code_roots`` when none are given."""
+    raw = arg_paths or [str(Path(r).expanduser()) for r in settings.code_roots]
+    return [Path(p) for p in raw]
+
+
 def _cmd_watch(settings: Settings, args: argparse.Namespace) -> int:
-    paths = [Path(p) for p in args.paths]
+    paths = _watch_targets(settings, args.paths)
+    if not paths:
+        print("nothing to watch: pass path(s) or set code_roots in config", file=sys.stderr)
+        return 2
     missing = [str(p) for p in paths if not p.exists()]
     if missing:
         print(f"no such path(s): {', '.join(missing)}", file=sys.stderr)
@@ -265,8 +274,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_query.add_argument("-k", type=int, default=5, help="number of results (default 5)")
     p_query.add_argument("--kind", default=None, help="filter by kind (code|doc|chat|learning)")
 
-    p_watch = sub.add_parser("watch", help="watch path(s) and keep the index live")
-    p_watch.add_argument("paths", nargs="+", help="files or directories to watch")
+    p_watch = sub.add_parser("watch", help="watch path(s) (or code_roots) and keep the index live")
+    p_watch.add_argument(
+        "paths", nargs="*", help="files/directories to watch (default: config code_roots)"
+    )
 
     sub.add_parser("sources", help="list indexed sources (grouped by repo)")
 
