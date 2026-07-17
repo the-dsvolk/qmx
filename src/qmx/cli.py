@@ -15,7 +15,7 @@ from pathlib import Path
 from qmx.capture import capture
 from qmx.config import Settings
 from qmx.embed import EmbedBackendError, OllamaEmbedder
-from qmx.index import backfill_chats, index_paths
+from qmx.index import backfill_chats, index_memory, index_paths
 from qmx.search import search
 from qmx.store import Store, StoreSchemaMismatch
 from qmx.watch import watch
@@ -85,6 +85,23 @@ def _cmd_backfill_chats(settings: Settings, args: argparse.Namespace) -> int:
 def _cmd_capture(settings: Settings, args: argparse.Namespace) -> int:
     # Stop-hook entrypoint: hook JSON arrives on stdin. Best-effort; never fails a turn.
     return capture(sys.stdin.read(), settings)
+
+
+def _cmd_index_memory(settings: Settings, args: argparse.Namespace) -> int:
+    try:
+        with _open_store(settings) as store, OllamaEmbedder(settings) as embedder:
+            stats = index_memory(settings.memory_globs, store, embedder, force=args.force)
+    except (StoreSchemaMismatch, EmbedBackendError) as exc:
+        print(f"index-memory failed: {exc}", file=sys.stderr)
+        return 1
+    print(
+        f"indexed {stats.files_indexed} memory file(s): {stats.chunks_embedded} embedded, "
+        f"{stats.chunks_reused} reused; skipped {stats.files_skipped}, "
+        f"scanned {stats.files_scanned}"
+    )
+    for err in stats.errors:
+        print(f"  ! {err}", file=sys.stderr)
+    return 0
 
 
 def _cmd_watch(settings: Settings, args: argparse.Namespace) -> int:
@@ -205,6 +222,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("capture", help="Stop-hook entrypoint: index the transcript named on stdin")
 
+    p_mem = sub.add_parser("index-memory", help="index Claude memory files (kind=memory)")
+    p_mem.add_argument("--force", action="store_true", help="re-index unchanged memory files too")
+
     p_query = sub.add_parser("query", help="hybrid (vector + BM25) search")
     p_query.add_argument("text", help="the query text")
     p_query.add_argument("-k", type=int, default=5, help="number of results (default 5)")
@@ -235,6 +255,7 @@ _COMMANDS = {
     "index": _cmd_index,
     "backfill-chats": _cmd_backfill_chats,
     "capture": _cmd_capture,
+    "index-memory": _cmd_index_memory,
     "query": _cmd_query,
     "watch": _cmd_watch,
     "sources": _cmd_sources,

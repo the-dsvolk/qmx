@@ -11,14 +11,16 @@ Phase 2 robustness core (``plan/qmx-plan.md``):
 
 from __future__ import annotations
 
+import glob
 import logging
 import os
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from qmx.chunk.chat import chunk_chat
 from qmx.chunk.code import chunk_code, language_for_path
+from qmx.chunk.doc import chunk_markdown
 from qmx.embed import Embedder
 from qmx.store import Chunk, ReindexResult, Store, hash_text
 
@@ -192,6 +194,86 @@ def _ingest_transcript(
     new_embeddings = embed_missing(store, embedder, chunks)  # embed before any DB write
     doc_id = store.upsert_document(
         kind="chat",
+        path=path_key,
+        repo=path.parent.name,
+        mtime=path.stat().st_mtime,
+        file_hash=file_hash,
+    )
+    result = store.reindex_document(doc_id, chunks, new_embeddings)
+
+    stats.files_indexed += 1
+    stats.chunks_added += result.mentions
+    stats.chunks_embedded += result.embedded
+    stats.chunks_reused += result.reused
+    stats.chunks_orphaned += result.orphaned
+
+
+# -- memory (kind="memory") --------------------------------------------------------------------
+
+
+def index_memory(
+    globs: Iterable[str], store: Store, embedder: Embedder, *, force: bool = False
+) -> IndexStats:
+    """Index Claude memory markdown from ``globs`` (``~`` expanded) as ``kind='memory'``.
+
+    A glob matching a directory is scanned recursively for ``*.md``; a glob matching a ``.md`` file
+    is taken directly. See ``Settings.memory_globs`` (default: per-project ``memory/`` dirs).
+    """
+    stats = IndexStats()
+    for md in _iter_memory_files(globs):
+        stats.files_scanned += 1
+        try:
+            _ingest_markdown(md, store, embedder, force, stats)
+        except OSError as exc:
+            stats.errors.append(f"{md}: {exc}")
+            log.warning("skip %s: %s", md, exc)
+    return stats
+
+
+def index_memory_dir(
+    memory_dir: Path, store: Store, embedder: Embedder, *, force: bool = False
+) -> IndexStats:
+    """Index every ``*.md`` under one memory directory (used by capture for a session's sibling)."""
+    stats = IndexStats()
+    if not Path(memory_dir).is_dir():
+        return stats
+    for md in sorted(Path(memory_dir).rglob("*.md")):
+        stats.files_scanned += 1
+        _ingest_markdown(md, store, embedder, force, stats)
+    return stats
+
+
+def _iter_memory_files(globs: Iterable[str]) -> Iterator[Path]:
+    seen: set[Path] = set()
+    for pattern in globs:
+        for match in sorted(glob.glob(os.path.expanduser(pattern))):
+            p = Path(match)
+            if p.is_dir():
+                candidates = sorted(p.rglob("*.md"))
+            elif p.suffix == ".md":
+                candidates = [p]
+            else:
+                candidates = []
+            for md in candidates:
+                if md not in seen:
+                    seen.add(md)
+                    yield md
+
+
+def _ingest_markdown(
+    path: Path, store: Store, embedder: Embedder, force: bool, stats: IndexStats
+) -> None:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    path_key = str(path.resolve())
+    file_hash = hash_text(text)
+    if not force and store.document_hash("memory", path_key) == file_hash:
+        stats.files_skipped += 1
+        return
+
+    chunks = chunk_markdown(text)
+    new_embeddings = embed_missing(store, embedder, chunks)
+    doc_id = store.upsert_document(
+        kind="memory",
         path=path_key,
         repo=path.parent.name,
         mtime=path.stat().st_mtime,

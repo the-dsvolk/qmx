@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 
 from qmx.config import Settings
 from qmx.embed import OllamaEmbedder
-from qmx.index import index_transcript
+from qmx.index import index_memory_dir, index_transcript
 from qmx.store import Store
 
 log = logging.getLogger("qmx.capture")
@@ -31,7 +32,14 @@ def capture(stdin_text: str, settings: Settings) -> int:
             OllamaEmbedder(settings) as embedder,
         ):
             stats = index_transcript(transcript_path, store, embedder)
-        log.info("captured %s (embedded %d)", transcript_path, stats.chunks_embedded)
+            # Also refresh this project's curated memory (sibling `memory/` of the transcript).
+            mem = index_memory_dir(Path(transcript_path).parent / "memory", store, embedder)
+        log.info(
+            "captured %s (chat +%d, memory +%d)",
+            transcript_path,
+            stats.chunks_embedded,
+            mem.chunks_embedded,
+        )
     except Exception as exc:  # noqa: BLE001 — a hook must not break the turn on any failure
         log.warning("capture skipped: %s", exc)
     return 0
