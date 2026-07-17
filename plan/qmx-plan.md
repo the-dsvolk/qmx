@@ -140,12 +140,53 @@ door); the Stop hook is the *write* door.
 - **Excludes:** `.git`, `node_modules`, `dist/`, lockfiles, binaries, size cap; logged, not silently
   skipped.
 
-## MCP + CLI surface
+## Interaction surfaces — the MCP server is primary
 
-- **MCP tools:** `query(text, kind?, repo?, k?)`, `get(chunk_id)` / expand-to-section, `status()`.
-- **CLI:** `qmx index <path...>`, `qmx backfill-chats`, `qmx watch`, `qmx serve` (MCP),
-  `qmx query "..."`, `qmx status`.
-- **Claude Code wiring:** MCP server entry in settings; Stop hook → `qmx capture`.
+qmx runs as a **resident daemon** that owns the index + the background loops (watch / index /
+consolidate). It has three client faces, all talking to the one daemon:
+
+```
+              ┌───────────────── qmx daemon (resident) ─────────────────┐
+              │  owns the index + runs watch / index / consolidate loops │
+              └───────┬───────────────┬───────────────────┬─────────────┘
+        MCP interface │      CLI       │      capture      │
+      (agents / CC)   │   (you)        │   (Stop hook)     │
+   mcp__qmx__search…  │  qmx query …   │  qmx capture      │
+```
+
+Why a daemon (not a bare stdio MCP server): a stdio server dies when Claude Code exits, which would
+kill the "always-on" capture/consolidation. The daemon stays up; MCP/CLI/hook are its clients.
+
+### MCP tools (the main way Claude Code interacts with qmx)
+
+| Tool | Capability | Returns |
+|---|---|---|
+| `search_code(query, k)` | #1 code | ranked code chunks with `file:line` |
+| `recall(query, k)` | #2 memory | matching past chat turns + expand-to-conclusion |
+| `lessons(query \| topic, type?, k)` | #3 learnings | relevant decisions / mistakes / howtos / preferences |
+| `query(text, kind?, k)` | unified | searches the whole flat KB (`kind` optional filter) |
+| `get(id)` / `expand(id)` | all | full source / surrounding turns |
+| `status()` | ops | index stats, last index time, Ollama health |
+| `add_learning(...)` / `consolidate()` *(optional write)* | #3 | explicitly save a lesson / trigger distillation |
+
+Tools appear in Claude Code as `mcp__qmx__*`.
+
+### CLI (human surface)
+
+`qmx serve` (start daemon), `qmx index <path...>`, `qmx backfill-chats`, `qmx query "..."`,
+`qmx lessons <topic>`, `qmx status`, `qmx capture` (hook entrypoint).
+
+### Claude Code wiring
+
+- **Register** the qmx MCP endpoint in settings (`mcpServers`) → tools become `mcp__qmx__*`.
+- **Read door** = MCP (`search_code` / `recall` / `lessons`). **Write door** = the `Stop` hook
+  (`qmx capture`).
+- **Proactive injection (the payoff):** a `SessionStart` hook calls `qmx lessons` for the current
+  context and injects relevant learnings — so the agent *starts* already knowing "last time
+  bucket-level IAM failed; use project-level," without being asked. This is what makes #3 actually
+  "learn from mistakes" rather than being a passive lookup.
+- **Transport:** the daemon serves an HTTP MCP endpoint (Claude Code connects directly, or via a thin
+  stdio bridge) so the resident background loops survive independently of any Claude Code session.
 
 ## Phasing
 
