@@ -37,8 +37,10 @@ add on-the-fly chat capture.
 
 ## Repo
 
-- Remote: `https://github.com/the-dsvolk/qmx` (public). Commit as `dsvolk@gmail.com` (personal —
-  this is a public repo; do **not** use a corporate email).
+- Remote: `https://github.com/the-dsvolk/qmx` (public). Commit as
+  `225248328+the-dsvolk@users.noreply.github.com` — the GitHub noreply email for the **the-dsvolk**
+  account, so commits attribute to it (not the separate `dsovlk` account) and no real email lands in
+  public history. Do **not** use a corporate email.
 
 > Status: scaffolding. The concrete rewrite approach (fork-and-strip vs from-scratch, model hosting)
 > is being chosen before code lands.
