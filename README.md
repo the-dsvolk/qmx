@@ -72,11 +72,11 @@ see [plan/qmx-ml-notes.md](./plan/qmx-ml-notes.md).
 
 ## Status
 
-Phase 3 (MCP server) landing: qmx now runs as a resident **MCP server** exposing
-`query` / `search_code` / `get` / `status` to Claude Code, on top of tree-sitter chunking,
-incremental indexing, and hybrid **vector + BM25 → RRF** search (`index` / `query` / `watch` / `gc`).
-Reranking is deferred (RRF-only) — Ollama has no rerank endpoint; see
-[`plan/qmx-ml-notes.md`](./plan/qmx-ml-notes.md). See [`plan/`](./plan) for the full design.
+Phase 4 (chats) landing: qmx now indexes your Claude Code **conversation history** alongside code —
+`qmx backfill-chats` for past transcripts and a `Stop` hook (`qmx capture`) for live turns, recalled
+via the `mcp__qmx__recall` tool. Built on the resident **MCP server** (Phase 3), tree-sitter
+chunking, incremental indexing, and hybrid **vector + BM25 → RRF** search. Reranking is deferred
+(RRF-only) — see [`plan/qmx-ml-notes.md`](./plan/qmx-ml-notes.md). See [`plan/`](./plan) for the design.
 
 ## Development
 

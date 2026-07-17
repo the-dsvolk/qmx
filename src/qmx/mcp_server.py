@@ -33,6 +33,14 @@ def build_server(settings: Settings, service: QmxService | None = None) -> FastM
         return svc.query(text, k=k, kind="code")
 
     @server.tool()
+    def recall(text: str, k: int = 5) -> list[dict]:
+        """Recall past Claude Code conversations — semantic search over indexed chat turns.
+
+        Returns matching turns with their transcript path, line, and role (user/assistant).
+        """
+        return svc.recall(text, k=k)
+
+    @server.tool()
     def get(chunk_id: int) -> dict | None:
         """Fetch a single chunk's full text + location by ``chunk_id`` (from a prior result)."""
         return svc.get(chunk_id)

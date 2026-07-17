@@ -126,8 +126,9 @@ claude mcp get qmx      # → ✔ Connected
 ```
 
 Open a **new** Claude Code session (tools load at startup) and the following appear:
-`mcp__qmx__query`, `mcp__qmx__search_code`, `mcp__qmx__get`, `mcp__qmx__status`. Ask something like
-*"use qmx to find the rate-limiter"*.
+`mcp__qmx__query`, `mcp__qmx__search_code`, `mcp__qmx__recall`, `mcp__qmx__get`, `mcp__qmx__status`.
+Ask something like *"use qmx to find the rate-limiter"* (`recall` searches past chats specifically;
+`query` searches everything).
 
 > Tools are **available** to the agent, not auto-run: Claude calls them when relevant or when you
 > ask. Proactive "always consult qmx" wiring (a hook) is future work.
@@ -152,6 +153,39 @@ qmx status                    # documents / chunks / mentions / live vs tombston
   you gave the project its own DB (`QMX_DB_PATH=~/.qmx/<name>.db`), just `rm ~/.qmx/<name>.db*`.
 - **Multiple codebases** — index several into one DB (they're distinguished by `path`), or keep one
   DB per project and switch with `QMX_DB_PATH`.
+
+## 7. Chat memory — index past chats & capture new ones
+
+qmx also indexes your Claude Code conversation history (as `kind=chat`, into the **same** flat KB as
+code), so you can recall past sessions by meaning.
+
+**Backfill existing transcripts** — one-time import of `~/.claude/projects/*/*.jsonl`:
+
+```bash
+qmx backfill-chats                              # all transcripts in ~/.claude/projects
+qmx backfill-chats --projects /path/to/projects # a custom location
+qmx query "when did we discuss retry backoff" --kind chat
+```
+
+It parses the JSONL directly and keeps only human/assistant **text** — `thinking`, tool calls/results,
+side-chains, and system reminders are dropped. Re-running is cheap: only new turns embed.
+
+**Capture new turns live** — add a Claude Code `Stop` hook so every finished turn is indexed. In
+`~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "qmx capture" } ] }
+    ]
+  }
+}
+```
+
+Claude Code pipes the turn's transcript path to `qmx capture` on stdin; it incrementally indexes just
+the new turn(s). It's **best-effort and never blocks a turn** (any failure is swallowed). Then
+`mcp__qmx__recall` (or `qmx query --kind chat`) surfaces those conversations.
 
 ## Verifying a query actually hit qmx
 
