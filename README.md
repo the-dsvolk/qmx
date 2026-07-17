@@ -95,6 +95,32 @@ flowchart LR
   DB --> RC
 ```
 
+**Keeping code current (`watch`)** — the code counterpart to chat capture. `qmx watch` subscribes to
+OS filesystem events (**macOS FSEvents** via `watchdog`): the kernel *pushes the changed path* — no
+polling, no tree scan. Only recognised code files are (re)indexed, and only the *changed chunks*
+re-embed (content-hash diff); non-code files are ignored:
+
+```mermaid
+flowchart LR
+  SAVE["edit / save a file<br/>under code_roots"]
+  subgraph OS["macOS kernel"]
+    FSE["FSEvents<br/>pushes the changed path"]
+  end
+  subgraph W["qmx watch (launchd)"]
+    H{"code file?"}
+    RI["reindex that one file<br/>chunk → hash → embed only NEW chunks"]
+    IGN["ignore"]
+    DB[("flat KB · SQLite")]
+  end
+  SAVE --> FSE
+  FSE -- "changed path" --> H
+  H -- "yes (.py/.ts/…)" --> RI --> DB
+  H -- "no (.md, data, …)" --> IGN
+```
+
+(Delete → the file's chunks are dropped; move → drop old + index new. `busy_timeout` lets watch,
+the capture hook, and `refresh` write the flat KB concurrently.)
+
 Choose where the backend lives with `QMX_OLLAMA_URL` and which model embeds with `embed_model`
 (see [QUICKSTART.md](./QUICKSTART.md)).
 
