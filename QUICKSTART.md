@@ -189,6 +189,25 @@ Claude Code pipes the turn's transcript path to `qmx capture` on stdin; it incre
 the new turn(s). It's **best-effort and never blocks a turn** (any failure is swallowed). Then
 `mcp__qmx__recall` (or `qmx query --kind chat`) surfaces those conversations.
 
+### Claude memory files
+
+qmx also indexes your **curated Claude memory** (`~/.claude/projects/*/memory/*.md` — the `MEMORY.md`
+index + per-fact notes) as `kind="memory"`, so those facts are searchable too. `qmx capture` refreshes
+the current project's memory automatically (the `memory/` sibling of the transcript); to backfill all
+of it:
+
+```bash
+qmx index-memory               # sweeps the configured memory roots
+qmx query "spark ssh" --kind memory
+```
+
+The roots are a config list — set `memory_globs` in `config.toml` (or `QMX_MEMORY_GLOBS=a,b`) to add
+other locations (dirs are scanned for `*.md`; a `.md` path is taken directly):
+
+```toml
+memory_globs = ["~/.claude/projects/*/memory", "~/.claude/CLAUDE.md"]
+```
+
 ## Verifying a query actually hit qmx
 
 Tail the server log while you ask a question:

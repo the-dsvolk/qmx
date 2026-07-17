@@ -30,7 +30,12 @@ _ENV_MAP = {
     "QMX_REQUEST_TIMEOUT": "request_timeout",
     "QMX_MAX_RETRIES": "max_retries",
     "QMX_RETRY_BASE_DELAY": "retry_base_delay",
+    "QMX_MEMORY_GLOBS": "memory_globs",
 }
+
+# Where Claude memory lives. Globs (``~`` expanded) matching memory dirs or .md files; a dir match
+# is scanned recursively for *.md. Indexed as ``kind="memory"``.
+DEFAULT_MEMORY_GLOBS = ("~/.claude/projects/*/memory",)
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +66,9 @@ class Settings:
     request_timeout: float = 60.0
     max_retries: int = 5
     retry_base_delay: float = 0.5
+
+    # Claude memory sources (kind="memory"). A TOML list, or comma-separated in the env var.
+    memory_globs: tuple[str, ...] = DEFAULT_MEMORY_GLOBS
 
     @classmethod
     def load(cls, config_path: Path | None = None, env: dict[str, str] | None = None) -> Settings:
@@ -93,12 +101,16 @@ class Settings:
     def as_dict(self) -> dict[str, object]:
         d = asdict(self)
         d["db_path"] = str(self.db_path)
+        d["memory_globs"] = list(self.memory_globs)
         return d
 
 
 def _coerce_value(name: str, raw: object) -> object:
     if name == "db_path":
         return Path(raw).expanduser() if not isinstance(raw, Path) else raw
+    if name == "memory_globs":
+        items = raw.split(",") if isinstance(raw, str) else list(raw)
+        return tuple(s.strip() for s in items if str(s).strip())
     if name in {"embed_dim", "embed_batch_size", "max_retries", "mcp_port"}:
         return int(raw)
     if name in {"request_timeout", "retry_base_delay"}:
