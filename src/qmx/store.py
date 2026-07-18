@@ -286,6 +286,20 @@ class Store:
         ).fetchone()
         return row[0] if row is not None else None
 
+    def document_id(self, kind: str, path: str) -> int | None:
+        """The ``doc_id`` for ``(kind, path)``, or ``None`` if not indexed."""
+        row = self._conn.execute(
+            "SELECT doc_id FROM documents WHERE kind=? AND path=?", (kind, path)
+        ).fetchone()
+        return None if row is None else row[0]
+
+    def list_documents(self, kind: str) -> list[tuple[int, str]]:
+        """``(doc_id, path)`` for every document of ``kind`` (e.g. all chat transcripts)."""
+        rows = self._conn.execute(
+            "SELECT doc_id, path FROM documents WHERE kind=? ORDER BY doc_id", (kind,)
+        ).fetchall()
+        return [(r[0], r[1]) for r in rows]
+
     def documents_under(self, kind: str, path_prefix: str) -> list[tuple[int, str]]:
         """``(doc_id, path)`` for documents whose path starts with ``path_prefix``."""
         rows = self._conn.execute(

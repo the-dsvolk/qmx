@@ -92,6 +92,21 @@ def add_learning(
     return learning_id
 
 
+def reembed_learning(store: Store, embedder: Embedder, learning_id: int) -> None:
+    """Rebuild a learning's embedded chunk from its current row (after an ``update``)."""
+    learning = store.get_learning(learning_id)
+    if learning is None:
+        return
+    doc_id = learning.doc_id or store.upsert_document(
+        kind="learning", path=learning_doc_path(learning_id), repo=learning.scope or "_global"
+    )
+    body = embed_text(learning.type, learning.statement, learning.detail, learning.topic)
+    chunk = Chunk(text=f"{body}\n[#{learning_id}]", symbol=learning.type)
+    reindex(store, embedder, doc_id, [chunk])
+    if learning.doc_id is None:
+        store.set_learning_doc(learning_id, doc_id)
+
+
 def lessons(
     store: Store,
     embedder: Embedder,

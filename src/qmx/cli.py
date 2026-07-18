@@ -13,9 +13,11 @@ import sys
 from pathlib import Path
 
 from qmx.capture import capture
+from qmx.chat import ChatBackendError, OllamaChat
 from qmx.config import Settings
+from qmx.consolidate import consolidate_session
 from qmx.embed import EmbedBackendError, OllamaEmbedder
-from qmx.index import backfill_chats, index_memory, index_paths
+from qmx.index import backfill_chats, index_memory, index_paths, index_transcript
 from qmx.learnings import add_learning, lessons
 from qmx.rerank import make_reranker
 from qmx.search import search
@@ -295,6 +297,47 @@ def _cmd_lessons(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_consolidate(settings: Settings, args: argparse.Namespace) -> int:
+    """Distil chat turns into learnings — one session (--session) or every chat doc (--all)."""
+    if not args.session and not args.all:
+        print("consolidate: pass --session <transcript> or --all", file=sys.stderr)
+        return 2
+    try:
+        with (
+            _open_store(settings) as store,
+            OllamaEmbedder(settings) as embedder,
+            OllamaChat(settings) as chat,
+        ):
+            targets: list[int] = []
+            if args.session:
+                path_key = str(Path(args.session).resolve())
+                if store.document_id("chat", path_key) is None:
+                    index_transcript(Path(args.session), store, embedder)  # index if new
+                doc_id = store.document_id("chat", path_key)
+                if doc_id is None:
+                    print(f"no chat turns indexed for {args.session}", file=sys.stderr)
+                    return 1
+                targets = [doc_id]
+            else:
+                targets = [doc_id for doc_id, _ in store.list_documents("chat")]
+
+            created = updated = superseded = candidates = 0
+            for doc_id in targets:
+                res = consolidate_session(store, embedder, chat, doc_id, scope=args.scope)
+                created += res.created
+                updated += res.updated
+                superseded += res.superseded
+                candidates += res.candidates
+    except (StoreSchemaMismatch, EmbedBackendError, ChatBackendError) as exc:
+        print(f"consolidate failed: {exc}", file=sys.stderr)
+        return 1
+    print(
+        f"consolidated {len(targets)} session(s): {candidates} candidate(s) -> "
+        f"{created} new, {updated} updated, {superseded} superseded"
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="qmx", description="Query Memory indeX")
     parser.add_argument("-v", "--verbose", action="store_true", help="log indexing detail")
@@ -337,6 +380,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_add.add_argument("--scope", default=None, help="repo key it applies to (omit = global)")
     p_add.add_argument("--importance", type=float, default=0.5, help="0..1 (default 0.5)")
 
+    p_con = sub.add_parser("consolidate", help="distil chat turns into learnings (Qwen)")
+    p_con.add_argument("--session", default=None, help="a transcript .jsonl to consolidate")
+    p_con.add_argument("--all", action="store_true", help="consolidate every indexed chat doc")
+    p_con.add_argument("--scope", default=None, help="repo key to tag the learnings with")
+
     p_les = sub.add_parser("lessons", help="recall distilled lessons (ranked)")
     p_les.add_argument("query", help="what to recall lessons about")
     p_les.add_argument("-k", type=int, default=5, help="number of lessons (default 5)")
@@ -378,6 +426,7 @@ _COMMANDS = {
     "query": _cmd_query,
     "add-learning": _cmd_add_learning,
     "lessons": _cmd_lessons,
+    "consolidate": _cmd_consolidate,
     "watch": _cmd_watch,
     "sources": _cmd_sources,
     "remove": _cmd_remove,
