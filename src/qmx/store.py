@@ -24,7 +24,7 @@ from pathlib import Path
 
 import sqlite_vec
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 _IN_BATCH = 500  # max params per IN(...) chunk
 
 
@@ -63,6 +63,31 @@ class SearchHit:
     start_line: int | None = None
     end_line: int | None = None
     symbol: str | None = None
+
+
+@dataclass(slots=True)
+class Learning:
+    """One distilled lesson (Capability #3). ``superseded_by``/``promoted_to`` track lifecycle."""
+
+    learning_id: int
+    type: str
+    topic: str | None
+    scope: str | None
+    statement: str
+    detail: str | None
+    importance: float
+    source_anchors: str | None
+    superseded_by: int | None
+    reuse_count: int
+    last_fired_at: str | None
+    promoted_to: str | None
+    created_at: str
+    updated_at: str
+    doc_id: int | None
+
+    @property
+    def is_live(self) -> bool:
+        return self.superseded_by is None
 
 
 @dataclass(slots=True)
@@ -118,13 +143,23 @@ class Store:
         version = self._conn.execute("PRAGMA user_version").fetchone()[0]
         if version == 0:
             self._create_schema()
-            self._conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
-            self._conn.commit()
-        elif version != SCHEMA_VERSION:
+            version = SCHEMA_VERSION
+        elif version > SCHEMA_VERSION:
             raise StoreSchemaMismatch(
-                f"DB schema v{version} != code v{SCHEMA_VERSION}; rebuild the index"
+                f"DB schema v{version} is newer than code v{SCHEMA_VERSION}; upgrade qmx"
             )
+        while version < SCHEMA_VERSION:  # additive in-place upgrades (no rebuild needed)
+            version = self._apply_migration(version)
+        self._conn.execute(f"PRAGMA user_version={version}")
+        self._conn.commit()
         self._check_embed_meta()
+
+    def _apply_migration(self, version: int) -> int:
+        """Apply the one incremental step from ``version`` and return the new version."""
+        if version == 3:  # v3 -> v4: add the learnings tier (learnings + consolidated cursor)
+            self._create_learnings_schema()
+            return 4
+        raise StoreSchemaMismatch(f"no migration path from schema v{version}")
 
     def _create_schema(self) -> None:
         c = self._conn
@@ -170,6 +205,43 @@ class Store:
         c.execute("CREATE VIRTUAL TABLE fts_chunks USING fts5(text)")
         c.execute("INSERT INTO meta(key, value) VALUES('embed_dim', ?)", (str(self._embed_dim),))
         c.execute("INSERT INTO meta(key, value) VALUES('embed_model', ?)", (self._embed_model,))
+        self._create_learnings_schema()
+
+    def _create_learnings_schema(self) -> None:
+        """The learnings tier (Capability #3): distilled lessons + the consolidation cursor.
+
+        A learning's ``statement``+``detail`` is *also* embedded as a ``kind='learning'`` document
+        (one chunk, ``path='learning:<id>'``) so retrieval reuses the vector+FTS pipeline unchanged;
+        this table holds the structured metadata (type/scope/importance/supersede/promotion).
+        """
+        self._conn.executescript(
+            """
+            CREATE TABLE learnings (
+                learning_id   INTEGER PRIMARY KEY,
+                doc_id        INTEGER REFERENCES documents(doc_id) ON DELETE SET NULL,
+                type          TEXT NOT NULL,         -- decision | mistake | howto
+                topic         TEXT,
+                scope         TEXT,                  -- canonical repo key, or NULL = global
+                statement     TEXT NOT NULL,
+                detail        TEXT,
+                importance    REAL NOT NULL DEFAULT 0.5,   -- 0..1, used in retrieval ranking
+                source_anchors TEXT,                 -- JSON citations
+                superseded_by INTEGER REFERENCES learnings(learning_id),
+                reuse_count   INTEGER NOT NULL DEFAULT 0,  -- promotion gate
+                last_fired_at TEXT,
+                promoted_to   TEXT,                  -- curated memory/*.md path it graduated to
+                created_at    TEXT DEFAULT (datetime('now')),
+                updated_at    TEXT DEFAULT (datetime('now'))
+            );
+            CREATE INDEX idx_learnings_scope ON learnings(scope);
+            CREATE INDEX idx_learnings_doc ON learnings(doc_id);
+
+            CREATE TABLE consolidated (   -- restart-safe cursor: chat chunks already distilled
+                chunk_id INTEGER PRIMARY KEY REFERENCES chunks(chunk_id) ON DELETE CASCADE,
+                at       TEXT DEFAULT (datetime('now'))
+            );
+            """
+        )
 
     def _check_embed_meta(self) -> None:
         rows = dict(self._conn.execute("SELECT key, value FROM meta").fetchall())
@@ -213,6 +285,20 @@ class Store:
             "SELECT file_hash FROM documents WHERE kind=? AND path=?", (kind, path)
         ).fetchone()
         return row[0] if row is not None else None
+
+    def document_id(self, kind: str, path: str) -> int | None:
+        """The ``doc_id`` for ``(kind, path)``, or ``None`` if not indexed."""
+        row = self._conn.execute(
+            "SELECT doc_id FROM documents WHERE kind=? AND path=?", (kind, path)
+        ).fetchone()
+        return None if row is None else row[0]
+
+    def list_documents(self, kind: str) -> list[tuple[int, str]]:
+        """``(doc_id, path)`` for every document of ``kind`` (e.g. all chat transcripts)."""
+        rows = self._conn.execute(
+            "SELECT doc_id, path FROM documents WHERE kind=? ORDER BY doc_id", (kind,)
+        ).fetchall()
+        return [(r[0], r[1]) for r in rows]
 
     def documents_under(self, kind: str, path_prefix: str) -> list[tuple[int, str]]:
         """``(doc_id, path)`` for documents whose path starts with ``path_prefix``."""
@@ -490,6 +576,190 @@ class Store:
         base["tombstoned_chunks"] = orphans
         return base
 
+    # -- learnings (kind="learning") -----------------------------------------------------------
+
+    def insert_learning(
+        self,
+        *,
+        type: str,
+        statement: str,
+        topic: str | None = None,
+        scope: str | None = None,
+        detail: str | None = None,
+        importance: float = 0.5,
+        source_anchors: str | None = None,
+        doc_id: int | None = None,
+    ) -> int:
+        """Insert a learnings row; returns its ``learning_id``. Embedding is done separately."""
+        cur = self._conn.execute(
+            """
+            INSERT INTO learnings(
+                doc_id, type, topic, scope, statement, detail, importance, source_anchors)
+            VALUES(:doc_id, :type, :topic, :scope, :statement, :detail, :importance, :anchors)
+            RETURNING learning_id
+            """,
+            {
+                "doc_id": doc_id,
+                "type": type,
+                "topic": topic,
+                "scope": scope,
+                "statement": statement,
+                "detail": detail,
+                "importance": importance,
+                "anchors": source_anchors,
+            },
+        )
+        learning_id = cur.fetchone()[0]
+        self._conn.commit()
+        return learning_id
+
+    def set_learning_doc(self, learning_id: int, doc_id: int) -> None:
+        """Link a learning to the ``kind='learning'`` document holding its embedded chunk."""
+        with self._conn:
+            self._conn.execute(
+                "UPDATE learnings SET doc_id=?, updated_at=datetime('now') WHERE learning_id=?",
+                (doc_id, learning_id),
+            )
+
+    def get_learning(self, learning_id: int) -> Learning | None:
+        row = self._conn.execute(
+            "SELECT * FROM learnings WHERE learning_id=?", (learning_id,)
+        ).fetchone()
+        return None if row is None else _row_to_learning(row)
+
+    def learning_by_doc_id(self, doc_id: int) -> Learning | None:
+        row = self._conn.execute("SELECT * FROM learnings WHERE doc_id=?", (doc_id,)).fetchone()
+        return None if row is None else _row_to_learning(row)
+
+    def list_learnings(
+        self,
+        *,
+        scope: str | None = None,
+        include_global: bool = False,
+        live_only: bool = True,
+        exclude_promoted: bool = False,
+        min_importance: float | None = None,
+        min_reuse: int | None = None,
+        limit: int | None = None,
+    ) -> list[Learning]:
+        """Learnings ordered by importance then recency (the query-free injection ranking).
+
+        ``scope`` filters to that repo key; ``include_global`` also pulls ``scope IS NULL`` rows.
+        ``live_only`` excludes superseded lessons; ``exclude_promoted`` drops graduated ones.
+        ``min_importance``/``min_reuse`` gate promotion-eligibility (``qmx lessons --review``).
+        """
+        clauses: list[str] = []
+        params: list[object] = []
+        if scope is not None:
+            if include_global:
+                clauses.append("(scope = ? OR scope IS NULL)")
+                params.append(scope)
+            else:
+                clauses.append("scope = ?")
+                params.append(scope)
+        if live_only:
+            clauses.append("superseded_by IS NULL")
+        if exclude_promoted:
+            clauses.append("promoted_to IS NULL")
+        if min_importance is not None:
+            clauses.append("importance >= ?")
+            params.append(min_importance)
+        if min_reuse is not None:
+            clauses.append("reuse_count >= ?")
+            params.append(min_reuse)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        sql = f"SELECT * FROM learnings {where} ORDER BY importance DESC, updated_at DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(limit)
+        return [_row_to_learning(r) for r in self._conn.execute(sql, params).fetchall()]
+
+    def supersede_learning(self, old_id: int, new_id: int) -> None:
+        """Mark ``old_id`` as replaced by ``new_id`` (kept for audit, excluded from retrieval)."""
+        with self._conn:
+            self._conn.execute(
+                "UPDATE learnings SET superseded_by=?, updated_at=datetime('now') "
+                "WHERE learning_id=?",
+                (new_id, old_id),
+            )
+
+    def update_learning(
+        self,
+        learning_id: int,
+        *,
+        statement: str | None = None,
+        detail: str | None = None,
+        importance: float | None = None,
+        source_anchors: str | None = None,
+    ) -> None:
+        """Patch a live learning's content fields (used by consolidate's ``update`` decision)."""
+        sets: list[str] = []
+        params: list[object] = []
+        for col, val in (
+            ("statement", statement),
+            ("detail", detail),
+            ("importance", importance),
+            ("source_anchors", source_anchors),
+        ):
+            if val is not None:
+                sets.append(f"{col}=?")
+                params.append(val)
+        if not sets:
+            return
+        sets.append("updated_at=datetime('now')")
+        params.append(learning_id)
+        with self._conn:
+            self._conn.execute(
+                f"UPDATE learnings SET {', '.join(sets)} WHERE learning_id=?", params
+            )
+
+    def touch_learning(self, learning_id: int) -> None:
+        """Record a lesson firing (retrieved/injected): bump ``reuse_count`` + ``last_fired_at``."""
+        with self._conn:
+            self._conn.execute(
+                "UPDATE learnings SET reuse_count = reuse_count + 1, "
+                "last_fired_at = datetime('now') WHERE learning_id=?",
+                (learning_id,),
+            )
+
+    def set_promoted(self, learning_id: int, path: str) -> None:
+        """Record that a learning graduated to the curated memory file at ``path``."""
+        with self._conn:
+            self._conn.execute(
+                "UPDATE learnings SET promoted_to=?, updated_at=datetime('now') "
+                "WHERE learning_id=?",
+                (path, learning_id),
+            )
+
+    # -- consolidation cursor ------------------------------------------------------------------
+
+    def mark_consolidated(self, chunk_ids: Iterable[int]) -> None:
+        """Record chat chunks as distilled so a re-run never re-processes them (idempotent)."""
+        rows = [(cid,) for cid in chunk_ids]
+        if not rows:
+            return
+        with self._conn:
+            self._conn.executemany(
+                "INSERT OR IGNORE INTO consolidated(chunk_id) VALUES(?)", rows
+            )
+
+    def unconsolidated_chat_chunks(self, doc_id: int) -> list[SearchHit]:
+        """Live chat chunks of ``doc_id`` not yet in the consolidation cursor (transcript order)."""
+        rows = self._conn.execute(
+            """
+            SELECT c.chunk_id, 0.0 AS distance, c.text,
+                   m.doc_id, m.start_line, m.end_line, m.symbol, d.kind, d.path
+            FROM mentions m
+            JOIN chunks c ON c.chunk_id = m.chunk_id
+            JOIN documents d ON d.doc_id = m.doc_id
+            WHERE m.doc_id = ?
+              AND c.chunk_id NOT IN (SELECT chunk_id FROM consolidated)
+            ORDER BY m.ord
+            """,
+            (doc_id,),
+        ).fetchall()
+        return _rows_to_hits(rows, len(rows), None, distance_key="distance")
+
 
 # One mention per chunk for display metadata (lowest mention_id). Correlated so orphan chunks —
 # with no mention — yield NULL and are dropped by the INNER JOIN, excluding tombstones from search.
@@ -517,6 +787,26 @@ def _rows_to_hits(
         if kind is None or r["kind"] == kind
     ]
     return hits[:k]
+
+
+def _row_to_learning(r: sqlite3.Row) -> Learning:
+    return Learning(
+        learning_id=r["learning_id"],
+        type=r["type"],
+        topic=r["topic"],
+        scope=r["scope"],
+        statement=r["statement"],
+        detail=r["detail"],
+        importance=r["importance"],
+        source_anchors=r["source_anchors"],
+        superseded_by=r["superseded_by"],
+        reuse_count=r["reuse_count"],
+        last_fired_at=r["last_fired_at"],
+        promoted_to=r["promoted_to"],
+        created_at=r["created_at"],
+        updated_at=r["updated_at"],
+        doc_id=r["doc_id"],
+    )
 
 
 def _like_prefix(prefix: str) -> str:

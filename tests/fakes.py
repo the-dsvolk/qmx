@@ -46,6 +46,27 @@ class FakeEmbedder:
         return v
 
 
+class FakeChat:
+    """Scripted :class:`~qmx.chat.ChatModel` double — no backend.
+
+    ``extractions`` is a queue of candidate-lists (one per extract pass; reused when exhausted);
+    ``decisions`` a queue of consolidate decisions (default ``new``). The system prompt tells the
+    two passes apart (extract prompts contain "distill").
+    """
+
+    def __init__(
+        self, extractions: list[list[dict]] | None = None, decisions: list[dict] | None = None
+    ) -> None:
+        self._extractions = list(extractions or [])
+        self._decisions = list(decisions or [])
+
+    def complete_json(self, system: str, user: str, schema: dict | None = None) -> dict:
+        if "distill" in system:  # EXTRACT_SYSTEM
+            learnings = self._extractions.pop(0) if self._extractions else []
+            return {"learnings": learnings}
+        return self._decisions.pop(0) if self._decisions else {"action": "new"}
+
+
 def build_index(tmp_path: Path, embedder: FakeEmbedder, files: dict[str, str]):
     """Write ``files`` under ``tmp_path``, index them, and return a Settings pointing at the DB.
 

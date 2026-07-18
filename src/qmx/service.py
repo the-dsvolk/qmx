@@ -11,6 +11,7 @@ import httpx
 
 from qmx.config import Settings
 from qmx.embed import Embedder, OllamaEmbedder
+from qmx.learnings import add_learning, learning_to_dict, lessons
 from qmx.rerank import make_reranker
 from qmx.search import search
 from qmx.store import SearchHit, Store
@@ -42,6 +43,40 @@ class QmxService:
         with self._store() as store:
             results = search(store, self._embedder, text, k=k, kind="chat", reranker=self._reranker)
             return [_hit_dict(r.hit, score=r.score) for r in results]
+
+    def lessons(
+        self, query: str, k: int = 5, type: str | None = None, scope: str | None = None
+    ) -> list[dict]:
+        """Retrieve distilled lessons (``kind='learning'``) by relevance×importance×recency."""
+        with self._store() as store:
+            return lessons(
+                store, self._embedder, query, k=k, type=type, scope=scope, reranker=self._reranker
+            )
+
+    def add_learning(
+        self,
+        *,
+        type: str,
+        statement: str,
+        topic: str | None = None,
+        scope: str | None = None,
+        detail: str | None = None,
+        importance: float = 0.5,
+    ) -> dict:
+        """Manually add a lesson (seed / promote-from-review); returns the stored learning."""
+        with self._store() as store:
+            learning_id = add_learning(
+                store,
+                self._embedder,
+                type=type,
+                statement=statement,
+                topic=topic,
+                scope=scope,
+                detail=detail,
+                importance=importance,
+            )
+            learning = store.get_learning(learning_id)
+        return learning_to_dict(learning)
 
     def get(self, chunk_id: int) -> dict | None:
         """Full text + location for one chunk, or ``None`` if it is gone/tombstoned."""

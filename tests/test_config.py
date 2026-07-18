@@ -10,7 +10,7 @@ from qmx.config import Settings
 def test_defaults():
     s = Settings.load(config_path=Path("/does/not/exist"), env={})
     assert s.ollama_url == "http://localhost:11434"
-    assert s.embed_model == "qwen3-embedding"
+    assert s.embed_model == "qwen3-embedding:0.6b"
     assert s.embed_dim == 1024
 
 
