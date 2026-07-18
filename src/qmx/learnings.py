@@ -159,7 +159,10 @@ def inject_lessons(store: Store, scope: str | None, *, char_budget: int = 10_000
     Returns as many live lessons as fit in ``char_budget`` (the SessionStart ``additionalContext``
     cap). No embedding — injection has no query, so relevance is *project identity*, not meaning.
     """
-    candidates = store.list_learnings(scope=scope, include_global=True, live_only=True)
+    # Exclude promoted lessons: they live in curated memory now, so injecting them double-surfaces.
+    candidates = store.list_learnings(
+        scope=scope, include_global=True, live_only=True, exclude_promoted=True
+    )
     candidates.sort(key=lambda le: (le.importance, le.updated_at), reverse=True)
     chosen: list[Learning] = []
     used = 0

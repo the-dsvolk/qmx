@@ -19,6 +19,7 @@ from qmx.consolidate import consolidate_session
 from qmx.embed import EmbedBackendError, OllamaEmbedder
 from qmx.index import backfill_chats, index_memory, index_paths, index_transcript
 from qmx.learnings import add_learning, lessons
+from qmx.promote import PromotionError, promotable, promote
 from qmx.rerank import make_reranker
 from qmx.search import search
 from qmx.session import session_end, session_start
@@ -281,6 +282,11 @@ def _cmd_add_learning(settings: Settings, args: argparse.Namespace) -> int:
 
 
 def _cmd_lessons(settings: Settings, args: argparse.Namespace) -> int:
+    if args.review:
+        return _cmd_lessons_review(settings, args)
+    if not args.query:
+        print("lessons: pass a query, or --review", file=sys.stderr)
+        return 2
     reranker = make_reranker(settings)
     try:
         with _open_store(settings) as store, OllamaEmbedder(settings) as embedder:
@@ -309,6 +315,38 @@ def _cmd_lessons(settings: Settings, args: argparse.Namespace) -> int:
         print(f"    {le['statement']}")
         if le["detail"]:
             print(f"      ↳ {le['detail']}")
+    return 0
+
+
+def _cmd_lessons_review(settings: Settings, args: argparse.Namespace) -> int:
+    """List promotion-eligible lessons (live, unpromoted, over the gate) for `qmx promote`."""
+    try:
+        with _open_store(settings) as store:
+            eligible = promotable(
+                store, min_importance=args.min_importance, min_reuse=args.min_reuse
+            )
+    except StoreSchemaMismatch as exc:
+        print(f"lessons --review failed: {exc}", file=sys.stderr)
+        return 1
+    if not eligible:
+        print("(no lessons eligible for promotion)")
+        return 0
+    print(f"{len(eligible)} lesson(s) eligible for promotion — `qmx promote <id>`:")
+    for le in eligible:
+        scope = le.scope or "global"
+        print(f"  #{le.learning_id} [{le.type}/{scope}] imp={le.importance:.2f} "
+              f"reuse={le.reuse_count}: {le.statement}")
+    return 0
+
+
+def _cmd_promote(settings: Settings, args: argparse.Namespace) -> int:
+    try:
+        with _open_store(settings) as store:
+            path = promote(store, args.id, memory_root=settings.promoted_memory_root)
+    except (StoreSchemaMismatch, PromotionError) as exc:
+        print(f"promote failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"promoted learning #{args.id} -> {path}")
     return 0
 
 
@@ -403,14 +441,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_con.add_argument("--all", action="store_true", help="consolidate every indexed chat doc")
     p_con.add_argument("--scope", default=None, help="repo key to tag the learnings with")
 
-    p_les = sub.add_parser("lessons", help="recall distilled lessons (ranked)")
-    p_les.add_argument("query", help="what to recall lessons about")
+    p_les = sub.add_parser("lessons", help="recall distilled lessons (ranked) or --review")
+    p_les.add_argument("query", nargs="?", default=None, help="what to recall lessons about")
     p_les.add_argument("-k", type=int, default=5, help="number of lessons (default 5)")
     p_les.add_argument(
         "--type", choices=["decision", "mistake", "howto"], default=None, help="filter by type"
     )
     p_les.add_argument("--scope", default=None, help="filter to a repo key (+ global)")
     p_les.add_argument("--json", action="store_true", help="emit JSON instead of text")
+    p_les.add_argument(
+        "--review", action="store_true", help="list promotion-eligible lessons instead"
+    )
+    p_les.add_argument("--min-importance", type=float, default=0.6, help="review gate (def 0.6)")
+    p_les.add_argument("--min-reuse", type=int, default=1, help="review gate (default 1)")
+
+    p_prom = sub.add_parser("promote", help="graduate a lesson to per-repo curated memory")
+    p_prom.add_argument("id", type=int, help="learning id (from `qmx lessons --review`)")
 
     p_watch = sub.add_parser("watch", help="watch path(s) (or code_roots) and keep the index live")
     p_watch.add_argument(
@@ -446,6 +492,7 @@ _COMMANDS = {
     "query": _cmd_query,
     "add-learning": _cmd_add_learning,
     "lessons": _cmd_lessons,
+    "promote": _cmd_promote,
     "consolidate": _cmd_consolidate,
     "watch": _cmd_watch,
     "sources": _cmd_sources,

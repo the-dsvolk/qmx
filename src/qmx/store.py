@@ -637,12 +637,16 @@ class Store:
         scope: str | None = None,
         include_global: bool = False,
         live_only: bool = True,
+        exclude_promoted: bool = False,
+        min_importance: float | None = None,
+        min_reuse: int | None = None,
         limit: int | None = None,
     ) -> list[Learning]:
         """Learnings ordered by importance then recency (the query-free injection ranking).
 
         ``scope`` filters to that repo key; ``include_global`` also pulls ``scope IS NULL`` rows.
-        ``live_only`` excludes superseded lessons.
+        ``live_only`` excludes superseded lessons; ``exclude_promoted`` drops graduated ones.
+        ``min_importance``/``min_reuse`` gate promotion-eligibility (``qmx lessons --review``).
         """
         clauses: list[str] = []
         params: list[object] = []
@@ -653,10 +657,16 @@ class Store:
             else:
                 clauses.append("scope = ?")
                 params.append(scope)
-        elif not include_global:
-            pass  # no scope filter -> all scopes
         if live_only:
             clauses.append("superseded_by IS NULL")
+        if exclude_promoted:
+            clauses.append("promoted_to IS NULL")
+        if min_importance is not None:
+            clauses.append("importance >= ?")
+            params.append(min_importance)
+        if min_reuse is not None:
+            clauses.append("reuse_count >= ?")
+            params.append(min_reuse)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         sql = f"SELECT * FROM learnings {where} ORDER BY importance DESC, updated_at DESC"
         if limit is not None:

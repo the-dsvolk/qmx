@@ -33,6 +33,7 @@ _ENV_MAP = {
     "QMX_RETRY_BASE_DELAY": "retry_base_delay",
     "QMX_MEMORY_GLOBS": "memory_globs",
     "QMX_CODE_ROOTS": "code_roots",
+    "QMX_PROMOTED_MEMORY_ROOT": "promoted_memory_root",
 }
 
 # Where Claude memory lives. Globs (``~`` expanded) matching memory dirs or .md files; a dir match
@@ -78,6 +79,10 @@ class Settings:
 
     # Code repos to keep indexed (kind="code"), swept by ``qmx refresh``. Same list format.
     code_roots: tuple[str, ...] = ()
+
+    # Root of the per-repo curated-memory store that ``qmx promote`` writes to (isolated by repo
+    # key: ``<root>/<owner>__<repo>/``, ``<root>/_global/``). See ``plan/qmx-learnings.md``.
+    promoted_memory_root: str = "~/.qmx/memory"
 
     @classmethod
     def load(cls, config_path: Path | None = None, env: dict[str, str] | None = None) -> Settings:
