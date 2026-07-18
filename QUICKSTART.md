@@ -32,7 +32,7 @@ qmx --help
 ```
 
 `uv tool upgrade qmx` pulls the newest `main` and rebuilds the isolated tool env — run it after new
-features land (e.g. chat memory) to refresh the `qmx` command.
+features land (e.g. chat memory, or the learnings commands in step 8) to refresh the `qmx` command.
 
 ## 3. Configure (point at the embedding backend)
 
@@ -226,6 +226,58 @@ other locations (dirs are scanned for `*.md`; a `.md` path is taken directly):
 ```toml
 memory_globs = ["~/.claude/projects/*/memory", "~/.claude/CLAUDE.md"]
 ```
+
+## 8. Learnings — distil chats into lessons
+
+Beyond raw recall, qmx distils past chats into reusable **lessons** (`kind=learning`) — *decisions*,
+*mistakes+corrections*, *how-tos* — deduped/superseded so they self-correct, and injected at session
+start so an agent begins already knowing. Design: [`README.md`](./README.md#learnings-distilled-lessons)
+and [`plan/qmx-learnings.md`](./plan/qmx-learnings.md).
+
+**A. Pull the chat model** (the consolidation judge) on the Ollama backend, and point `chat_model`
+at it. It runs on the same Ollama the embeddings use — see [`INFRA.md`](./INFRA.md) for the Spark
+setup:
+
+```bash
+ollama pull qwen3.6:35b-a3b     # on the Ollama host (the Spark); ~23 GB
+```
+```toml
+# ~/.qmx/config.toml — optional; this is the default, add only to override
+chat_model = "qwen3.6:35b-a3b"
+```
+
+**B. Use it from the CLI:**
+
+```bash
+qmx add-learning "raise IAM PRs at project level" --type mistake \
+    --detail "bucket-level failed; ask in #platform-security-support" --scope the-dsvolk/qmx
+qmx lessons "how to raise an IAM PR"     # recall, ranked by relevance × importance × recency
+qmx consolidate --session <transcript>   # Qwen distils a chat into lessons (new/update/supersede)
+qmx lessons --review                     # list promotion-eligible lessons
+qmx promote <id>                         # graduate one into per-repo curated memory
+```
+
+Lessons are also exposed to Claude Code as `mcp__qmx__lessons` / `mcp__qmx__add_learning`.
+
+**C. Run it automatically** — add Claude Code hooks so each session consolidates on end and injects
+relevant lessons on start (alongside the `Stop` capture hook). In `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [{ "matcher": "startup", "hooks": [{ "type": "command", "command": "qmx session-start" }] }],
+    "SessionEnd":   [{ "hooks": [{ "type": "command", "command": "qmx session-end" }] }]
+  }
+}
+```
+
+`session-end` spawns `qmx consolidate` **detached** (never blocks the session closing); `session-start`
+injects the current repo's lessons (+ global), budgeted to 10k chars. For a **nightly catch-all**
+sweep (`qmx consolidate --all` via a launchd agent) and where these run, see the *Mac — learnings
+triggers* section of [`INFRA.md`](./INFRA.md).
+
+> Consolidation runs **on the client** (transcripts + index live here; it calls the backend only for
+> the model). Requires the installed `qmx` to include the learnings commands (`uv tool upgrade qmx`).
 
 ## Verifying a query actually hit qmx
 

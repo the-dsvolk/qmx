@@ -139,17 +139,131 @@ uvx --from "huggingface_hub[cli]" hf download ggml-org/Qwen3-Reranker-0.6B-Q8_0-
 `-b/-ub 8192` is required — the default 512 rejects long chunks (HTTP 500). Endpoint:
 `http://spark-0e81.local:8081/v1/rerank`. Clients enable it with `rerank_url` (off by default).
 
+## Spark — learnings/consolidation model (chat, GPU)
+
+The learnings tier (`qmx consolidate` / `session-end`) distils chats into lessons with a **Qwen chat
+model** — the one qmx component where model quality matters (judgment: what's a durable lesson, is
+this a dup or a supersede?). It runs on the **same Ollama service** as embeddings (no new unit) —
+just pull the model:
+
+```bash
+export OLLAMA_HOST=127.0.0.1:11434
+~/.local/ollama/bin/ollama pull qwen3.6:35b-a3b   # MoE 35B/3B-active; ~23 GB, fits the ~118 GB VRAM
+~/.local/ollama/bin/ollama list                   # confirm it appears alongside qwen3-embedding:0.6b
+```
+
+> **Verified working (2026-07-18).** Pulled on the Spark (`qwen3.6:35b-a3b`, 23 GB, MoE) and served by
+> the shared Ollama. Verified **end-to-end from the client**: on the Mac, `Settings.load()` →
+> `OllamaChat` → the production `extract_learnings` path (`think=false` + schema-constrained `format`)
+> reaches the Spark over `QMX_OLLAMA_URL` and returns a valid `{"learnings":[…]}` extraction with
+> `type` correctly on-enum (`decision|mistake|howto`). Warm round-trip ≈10 s; first (cold) call ≈44 s
+> incl. loading the model into VRAM.
+
+- **Where it's configured — on the client, not here.** Consolidation runs where the CLI/hooks run
+  (the Mac), talking to *this* Ollama over `QMX_OLLAMA_URL`; the Spark's resident MCP server never
+  calls the chat model (it only serves retrieval). So the Spark just needs the model **pulled**; the
+  model *name* is set on the Mac in **`~/.qmx/config.toml`** (`chat_model = "qwen3.6:35b-a3b"`, or
+  `QMX_CHAT_MODEL`) — see the Mac section below. Default is `qwen3.6:35b-a3b`, never hardcoded; to
+  swap models, pull the new tag on the Spark and change that one value.
+- **Batch, low-QPS.** Consolidation is a few calls at session end, so throughput is irrelevant;
+  `session-end` runs it **detached** so it never blocks a session closing. Nothing is resident.
+- **Deferred upgrade (only if v1 lessons are weak):** a `Qwen3.5-122B-A10B` in **NVFP4** on a
+  **vLLM** server (NVFP4 ≠ GGUF → not Ollama). Point `chat_model`/`QMX_OLLAMA_URL` at it if built.
+  See [`plan/qmx-learnings.md`](./plan/qmx-learnings.md) (*Model decision*).
+
+Client-side hooks that call this model (`SessionStart` inject, `SessionEnd` consolidate) are wired in
+Claude Code `settings.json` on the Mac — see the **Learnings** section of [`README.md`](./README.md).
+
 ## Mac — local qmx (Architecture B: index local, embed on the Spark)
 
 - Install: `uv tool install "git+https://github.com/the-dsvolk/qmx"` → `~/.local/bin/qmx`.
 - Config `~/.qmx/config.toml`: `ollama_url = "http://spark-0e81.local:11434"`,
   `embed_model = "qwen3-embedding:0.6b"`, `embed_dim = 1024`, `mcp_host = "127.0.0.1"`,
   `mcp_port = 8765`. Index at `~/.qmx/index.db`.
-- Always-on server: launchd agent `~/Library/LaunchAgents/com.qmx.serve.plist` runs
-  `qmx serve --transport http` (`RunAtLoad` + `KeepAlive`; log `~/.qmx/serve.log`).
+  - **Learnings model:** `chat_model = "qwen3.6:35b-a3b"` (the consolidation judge — this is the one
+    the `qmx consolidate` / `session-end` hook uses against the Spark's Ollama; must be pulled there).
+    It defaults to this value, so the line is optional unless you swap models.
+  - **Reranker (optional):** `rerank_url = "http://spark-0e81.local:8081"` enables the cross-encoder.
 - Claude Code: `claude mcp add --transport http --scope user qmx http://127.0.0.1:8765/mcp`.
 
+**launchd agents live in `~/Library/LaunchAgents/`** — they are **client-side machine state, not in
+the repo** (same as the Spark's systemd units above; the plists are reproduced here in full).
+Install each with `launchctl load -w ~/Library/LaunchAgents/<name>.plist`. Three exist:
+
+`com.qmx.serve.plist` — the always-on MCP server (`RunAtLoad`+`KeepAlive`; log `~/.qmx/serve.log`):
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.qmx.serve</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/YZ0315/.local/bin/qmx</string>
+    <string>serve</string><string>--transport</string><string>http</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/Users/YZ0315/.qmx/serve.log</string>
+  <key>StandardErrorPath</key><string>/Users/YZ0315/.qmx/serve.log</string>
+</dict>
+</plist>
+```
+
+`com.qmx.watch.plist` — keeps `code_roots` reindexed on save; identical shape but
+`ProgramArguments = [qmx, -v, watch]` and log `~/.qmx/watch.log`.
+(`com.qmx.consolidate.plist` — the learnings sweep — is shown in the next section.)
+
 Full step-by-step is in [`QUICKSTART.md`](./QUICKSTART.md).
+
+## Mac — learnings triggers (what runs consolidation "constantly")
+
+Consolidation runs on the **client** (transcripts + index are here; it calls the Spark only for the
+model). Two mechanisms, installed on the Mac — **no daemon, event-driven + a nightly safety net:**
+
+1. **Claude Code hooks** (`~/.claude/settings.json`) — the primary, per-session trigger:
+   ```json
+   "SessionStart": [{ "matcher": "startup", "hooks": [{ "type": "command", "command": "/Users/YZ0315/.local/bin/qmx session-start" }] }],
+   "SessionEnd":   [{ "hooks": [{ "type": "command", "command": "/Users/YZ0315/.local/bin/qmx session-end" }] }]
+   ```
+   `session-end` spawns `qmx consolidate` **detached** (never blocks session close); `session-start`
+   injects scope-matched lessons. Both are best-effort (exit 0). Alongside the existing `Stop →
+   qmx capture` hook.
+2. **Daily sweep** — a launchd catch-all for sessions the hook missed (crashes, backfilled/old
+   transcripts). Runs `qmx consolidate --all` at **03:00 daily**; cheap + idempotent (the
+   `consolidated` cursor means it only distils *new* turns). `~/Library/LaunchAgents/com.qmx.consolidate.plist`:
+
+   ```xml
+   <?xml version="1.0" encoding="UTF-8"?>
+   <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+   <plist version="1.0">
+   <dict>
+     <key>Label</key><string>com.qmx.consolidate</string>
+     <key>ProgramArguments</key>
+     <array>
+       <string>/Users/YZ0315/.local/bin/qmx</string><string>consolidate</string><string>--all</string>
+     </array>
+     <key>StartCalendarInterval</key>
+     <dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>0</integer></dict>
+     <key>RunAtLoad</key><false/>
+     <key>StandardOutPath</key><string>/Users/YZ0315/.qmx/consolidate.log</string>
+     <key>StandardErrorPath</key><string>/Users/YZ0315/.qmx/consolidate.log</string>
+   </dict>
+   </plist>
+   ```
+
+   (`StartCalendarInterval` = fixed clock time; launchd runs it on next wake if the Mac was asleep at
+   03:00 — unlike cron, which would skip it. Swap for `StartInterval` `<integer>21600</integer>` to run
+   every 6 h instead.)
+   > Caveat: `--all` has no per-transcript cwd, so swept lessons are **global** (`scope=NULL`); the
+   > per-session `SessionEnd` path derives the repo scope from `cwd` and scopes correctly.
+
+Manage: `launchctl load -w|unload ~/Library/LaunchAgents/com.qmx.consolidate.plist`;
+`launchctl start com.qmx.consolidate` to run the sweep now; `tail -f ~/.qmx/consolidate.log`.
+Requires the installed `qmx` to include the learnings commands (`uv tool upgrade qmx` once the
+learnings PR is on `main`). **Verified:** consolidating a real session produced 7 scoped lessons in
+~32 s, queryable via `qmx lessons`.
 
 ---
 
@@ -165,13 +279,19 @@ journalctl --user -u ollama -n 50
 loginctl show-user "$USER" -p Linger       # expect Linger=yes
 ```
 
-**Mac (launchd):**
+**Mac (launchd)** — three agents: `com.qmx.serve` (MCP), `com.qmx.watch` (code reindex),
+`com.qmx.consolidate` (daily learnings sweep, 03:00):
 
 ```bash
-launchctl list | grep qmx
+launchctl list | grep qmx                                     # serve, watch, consolidate
+# swap com.qmx.serve for .watch / .consolidate as needed:
 launchctl unload ~/Library/LaunchAgents/com.qmx.serve.plist   # stop
 launchctl load  -w ~/Library/LaunchAgents/com.qmx.serve.plist # start / enable at login
 tail -f ~/.qmx/serve.log
+
+# learnings daily sweep (com.qmx.consolidate):
+launchctl start com.qmx.consolidate                           # run the --all sweep now
+tail -f ~/.qmx/consolidate.log
 ```
 
 ## Rebuilding from scratch

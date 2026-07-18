@@ -1,5 +1,9 @@
 # qmx — Learnings & Consolidation (Capability #3) — implementation spec
 
+> **Status: implemented** (Phases A–E). Schema v4 + `qmx.learnings`/`consolidate`/`session`/`promote`,
+> CLI `add-learning`/`lessons`/`consolidate`/`lessons --review`/`promote`, MCP `lessons`/`add_learning`,
+> and SessionStart/SessionEnd hooks. Model is config-driven (`chat_model`, default `qwen3.6:35b-a3b`).
+
 Turns **raw recall** (`kind=chat` — past turns verbatim) into a **distilled tier** of reusable
 lessons (`kind=learning`): *decisions*, *mistakes+corrections*, and *how-tos*, auto-drafted from
 chats by a Qwen chat model, deduped/superseded so they self-correct, and **proactively injected** at

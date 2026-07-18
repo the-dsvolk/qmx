@@ -13,11 +13,16 @@ import sys
 from pathlib import Path
 
 from qmx.capture import capture
+from qmx.chat import ChatBackendError, OllamaChat
 from qmx.config import Settings
+from qmx.consolidate import consolidate_session
 from qmx.embed import EmbedBackendError, OllamaEmbedder
-from qmx.index import backfill_chats, index_memory, index_paths
+from qmx.index import backfill_chats, index_memory, index_paths, index_transcript
+from qmx.learnings import add_learning, lessons
+from qmx.promote import PromotionError, promotable, promote
 from qmx.rerank import make_reranker
 from qmx.search import search
+from qmx.session import session_end, session_start
 from qmx.store import Store, StoreSchemaMismatch
 from qmx.watch import watch
 
@@ -86,6 +91,20 @@ def _cmd_backfill_chats(settings: Settings, args: argparse.Namespace) -> int:
 def _cmd_capture(settings: Settings, args: argparse.Namespace) -> int:
     # Stop-hook entrypoint: hook JSON arrives on stdin. Best-effort; never fails a turn.
     return capture(sys.stdin.read(), settings)
+
+
+def _cmd_session_start(settings: Settings, args: argparse.Namespace) -> int:
+    # SessionStart hook: emit hookSpecificOutput.additionalContext JSON (or nothing). Never fails.
+    out = session_start(sys.stdin.read(), settings)
+    if out:
+        print(out)
+    return 0
+
+
+def _cmd_session_end(settings: Settings, args: argparse.Namespace) -> int:
+    # SessionEnd hook: spawn a detached consolidate so it never blocks session close. Never fails.
+    session_end(sys.stdin.read(), settings)
+    return 0
 
 
 def _cmd_refresh(settings: Settings, args: argparse.Namespace) -> int:
@@ -242,6 +261,136 @@ def _cmd_query(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_add_learning(settings: Settings, args: argparse.Namespace) -> int:
+    try:
+        with _open_store(settings) as store, OllamaEmbedder(settings) as embedder:
+            learning_id = add_learning(
+                store,
+                embedder,
+                type=args.type,
+                statement=args.statement,
+                topic=args.topic,
+                scope=args.scope,
+                detail=args.detail,
+                importance=args.importance,
+            )
+    except (StoreSchemaMismatch, EmbedBackendError, ValueError) as exc:
+        print(f"add-learning failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"added learning #{learning_id} [{args.type}]: {args.statement}")
+    return 0
+
+
+def _cmd_lessons(settings: Settings, args: argparse.Namespace) -> int:
+    if args.review:
+        return _cmd_lessons_review(settings, args)
+    if not args.query:
+        print("lessons: pass a query, or --review", file=sys.stderr)
+        return 2
+    reranker = make_reranker(settings)
+    try:
+        with _open_store(settings) as store, OllamaEmbedder(settings) as embedder:
+            results = lessons(
+                store,
+                embedder,
+                args.query,
+                k=args.k,
+                type=args.type,
+                scope=args.scope,
+                reranker=reranker,
+            )
+    except (StoreSchemaMismatch, EmbedBackendError) as exc:
+        print(f"lessons failed: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(results, indent=2))
+        return 0
+    if not results:
+        print("(no lessons)")
+        return 0
+    for i, le in enumerate(results, 1):
+        scope = le["scope"] or "global"
+        print(f"{i:>2}. [{le['score']:.4f}] #{le['learning_id']} ({le['type']}/{scope}) "
+              f"imp={le['importance']}")
+        print(f"    {le['statement']}")
+        if le["detail"]:
+            print(f"      ↳ {le['detail']}")
+    return 0
+
+
+def _cmd_lessons_review(settings: Settings, args: argparse.Namespace) -> int:
+    """List promotion-eligible lessons (live, unpromoted, over the gate) for `qmx promote`."""
+    try:
+        with _open_store(settings) as store:
+            eligible = promotable(
+                store, min_importance=args.min_importance, min_reuse=args.min_reuse
+            )
+    except StoreSchemaMismatch as exc:
+        print(f"lessons --review failed: {exc}", file=sys.stderr)
+        return 1
+    if not eligible:
+        print("(no lessons eligible for promotion)")
+        return 0
+    print(f"{len(eligible)} lesson(s) eligible for promotion — `qmx promote <id>`:")
+    for le in eligible:
+        scope = le.scope or "global"
+        print(f"  #{le.learning_id} [{le.type}/{scope}] imp={le.importance:.2f} "
+              f"reuse={le.reuse_count}: {le.statement}")
+    return 0
+
+
+def _cmd_promote(settings: Settings, args: argparse.Namespace) -> int:
+    try:
+        with _open_store(settings) as store:
+            path = promote(store, args.id, memory_root=settings.promoted_memory_root)
+    except (StoreSchemaMismatch, PromotionError) as exc:
+        print(f"promote failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"promoted learning #{args.id} -> {path}")
+    return 0
+
+
+def _cmd_consolidate(settings: Settings, args: argparse.Namespace) -> int:
+    """Distil chat turns into learnings — one session (--session) or every chat doc (--all)."""
+    if not args.session and not args.all:
+        print("consolidate: pass --session <transcript> or --all", file=sys.stderr)
+        return 2
+    try:
+        with (
+            _open_store(settings) as store,
+            OllamaEmbedder(settings) as embedder,
+            OllamaChat(settings) as chat,
+        ):
+            targets: list[int] = []
+            if args.session:
+                path_key = str(Path(args.session).resolve())
+                if store.document_id("chat", path_key) is None:
+                    index_transcript(Path(args.session), store, embedder)  # index if new
+                doc_id = store.document_id("chat", path_key)
+                if doc_id is None:
+                    print(f"no chat turns indexed for {args.session}", file=sys.stderr)
+                    return 1
+                targets = [doc_id]
+            else:
+                targets = [doc_id for doc_id, _ in store.list_documents("chat")]
+
+            created = updated = superseded = candidates = 0
+            for doc_id in targets:
+                res = consolidate_session(store, embedder, chat, doc_id, scope=args.scope)
+                created += res.created
+                updated += res.updated
+                superseded += res.superseded
+                candidates += res.candidates
+    except (StoreSchemaMismatch, EmbedBackendError, ChatBackendError) as exc:
+        print(f"consolidate failed: {exc}", file=sys.stderr)
+        return 1
+    print(
+        f"consolidated {len(targets)} session(s): {candidates} candidate(s) -> "
+        f"{created} new, {updated} updated, {superseded} superseded"
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="qmx", description="Query Memory indeX")
     parser.add_argument("-v", "--verbose", action="store_true", help="log indexing detail")
@@ -261,6 +410,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("capture", help="Stop-hook entrypoint: index the transcript named on stdin")
 
+    sub.add_parser("session-start", help="SessionStart hook: inject relevant lessons (stdin JSON)")
+    sub.add_parser("session-end", help="SessionEnd hook: detached consolidate (stdin JSON)")
+
     p_mem = sub.add_parser("index-memory", help="index Claude memory files (kind=memory)")
     p_mem.add_argument("--force", action="store_true", help="re-index unchanged memory files too")
 
@@ -273,6 +425,38 @@ def build_parser() -> argparse.ArgumentParser:
     p_query.add_argument("text", help="the query text")
     p_query.add_argument("-k", type=int, default=5, help="number of results (default 5)")
     p_query.add_argument("--kind", default=None, help="filter by kind (code|doc|chat|learning)")
+
+    p_add = sub.add_parser("add-learning", help="record a distilled lesson (kind=learning)")
+    p_add.add_argument("statement", help="the lesson, one crisp sentence")
+    p_add.add_argument(
+        "--type", choices=["decision", "mistake", "howto"], required=True, help="lesson type"
+    )
+    p_add.add_argument("--detail", default=None, help="why / the correction / the better way")
+    p_add.add_argument("--topic", default=None, help="short slug for filtering/injection")
+    p_add.add_argument("--scope", default=None, help="repo key it applies to (omit = global)")
+    p_add.add_argument("--importance", type=float, default=0.5, help="0..1 (default 0.5)")
+
+    p_con = sub.add_parser("consolidate", help="distil chat turns into learnings (Qwen)")
+    p_con.add_argument("--session", default=None, help="a transcript .jsonl to consolidate")
+    p_con.add_argument("--all", action="store_true", help="consolidate every indexed chat doc")
+    p_con.add_argument("--scope", default=None, help="repo key to tag the learnings with")
+
+    p_les = sub.add_parser("lessons", help="recall distilled lessons (ranked) or --review")
+    p_les.add_argument("query", nargs="?", default=None, help="what to recall lessons about")
+    p_les.add_argument("-k", type=int, default=5, help="number of lessons (default 5)")
+    p_les.add_argument(
+        "--type", choices=["decision", "mistake", "howto"], default=None, help="filter by type"
+    )
+    p_les.add_argument("--scope", default=None, help="filter to a repo key (+ global)")
+    p_les.add_argument("--json", action="store_true", help="emit JSON instead of text")
+    p_les.add_argument(
+        "--review", action="store_true", help="list promotion-eligible lessons instead"
+    )
+    p_les.add_argument("--min-importance", type=float, default=0.6, help="review gate (def 0.6)")
+    p_les.add_argument("--min-reuse", type=int, default=1, help="review gate (default 1)")
+
+    p_prom = sub.add_parser("promote", help="graduate a lesson to per-repo curated memory")
+    p_prom.add_argument("id", type=int, help="learning id (from `qmx lessons --review`)")
 
     p_watch = sub.add_parser("watch", help="watch path(s) (or code_roots) and keep the index live")
     p_watch.add_argument(
@@ -301,9 +485,15 @@ _COMMANDS = {
     "index": _cmd_index,
     "backfill-chats": _cmd_backfill_chats,
     "capture": _cmd_capture,
+    "session-start": _cmd_session_start,
+    "session-end": _cmd_session_end,
     "index-memory": _cmd_index_memory,
     "refresh": _cmd_refresh,
     "query": _cmd_query,
+    "add-learning": _cmd_add_learning,
+    "lessons": _cmd_lessons,
+    "promote": _cmd_promote,
+    "consolidate": _cmd_consolidate,
     "watch": _cmd_watch,
     "sources": _cmd_sources,
     "remove": _cmd_remove,

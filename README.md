@@ -22,13 +22,48 @@ Powered by the [Qwen](https://github.com/QwenLM) embedding/rerank models and
 
 ## Architecture
 
-qmx is two cooperating pieces joined by one config knob (`QMX_OLLAMA_URL`):
+**The big picture — three pieces:**
+
+```mermaid
+flowchart LR
+  U["Claude Code / you"]
+
+  subgraph MAC["Your Mac — the client (answers here)"]
+    S["qmx MCP server"]
+    DB[("local index<br/>SQLite: vectors + BM25")]
+    S <--> DB
+  end
+
+  subgraph SPARK["DGX Spark — GPU (models only)"]
+    E["Qwen embeddings"]
+    C["Qwen chat model<br/>(learnings / consolidation)"]
+    R["Qwen reranker"]
+  end
+
+  U -->|"MCP: query · recall · lessons"| S
+  S -->|"embed · rerank"| E
+  S -.->|"rerank top-k"| R
+  S -->|"consolidate chats → lessons"| C
+```
+
+- **DGX Spark (GPU)** — runs the **Qwen models only**: **embeddings**, the **reranker**, and the
+  **chat model** that distils chats into *learnings*. Text is sent for compute; **nothing is stored
+  there**.
+- **Your Mac (the client)** — holds the **local index** (SQLite: `sqlite-vec` vectors + FTS5/BM25)
+  and runs the **MCP server**. It does the actual searching and **answers from the local DB**,
+  calling the Spark only for model compute.
+- **Claude Code (you)** — talks to the Mac's MCP server (`query` / `recall` / `lessons` / …); it
+  never touches the Spark directly.
+
+One config knob (`QMX_OLLAMA_URL`) points the Mac at the Spark. In more detail, qmx is two
+cooperating pieces:
 
 - **qmx** (this tool) — the **index and search**: chunking, the SQLite store (`sqlite-vec` + FTS5),
   hybrid ranking, the CLI, and the MCP server all run **on your machine**.
-- **An Ollama backend** — produces the **embeddings** with a **Qwen** model. It can be the *same*
-  machine, or a GPU box on your LAN (e.g. a DGX Spark). The only thing that crosses to it is the
-  text being embedded; the index and all search stay local.
+- **An Ollama backend** — produces the **embeddings** with a **Qwen** model (and, for the learnings
+  tier, serves the **chat model**; optionally a **reranker**). It can be the *same* machine, or a GPU
+  box on your LAN (e.g. a DGX Spark). The only thing that crosses to it is the text being embedded or
+  consolidated; the index and all search stay local.
 
 So you can run everything on one laptop, or keep the index local and offload embeddings to a GPU box.
 
@@ -147,13 +182,49 @@ flowchart LR
 
 See [plan/qmx-ml-notes.md](./plan/qmx-ml-notes.md) (TD-1) for how the reranker is built and served.
 
+## Learnings (distilled lessons)
+
+Beyond raw recall, qmx distils past chats into a **learnings** tier (`kind=learning`) — reusable
+*decisions*, *mistakes+corrections*, and *how-tos* — deduped/superseded so they self-correct, and
+**proactively injected at session start** so an agent begins already knowing. See
+[`plan/qmx-learnings.md`](./plan/qmx-learnings.md) for the design; the model (a Qwen chat model, e.g.
+`qwen3.6:35b-a3b`) is config-driven via `chat_model`, never hardcoded.
+
+```bash
+qmx add-learning "raise IAM PRs at project level" --type mistake \
+    --detail "bucket-level failed; ask in #platform-security-support" --scope the-dsvolk/qmx
+qmx lessons "how to raise an IAM PR"     # recall, ranked by relevance × importance × recency
+qmx consolidate --session <transcript>   # Qwen distils a chat into lessons (new/update/supersede)
+qmx lessons --review                     # list promotion-eligible lessons
+qmx promote <id>                         # graduate one into per-repo curated memory
+```
+
+**Hooks** (optional, wire in `settings.json` like the `Stop`/capture hook) — inject at start,
+consolidate at end (the latter runs detached so it never blocks session close):
+
+```json
+{ "hooks": {
+    "SessionStart": [{ "matcher": "startup", "hooks": [{ "type": "command", "command": "qmx session-start" }] }],
+    "SessionEnd":   [{ "hooks": [{ "type": "command", "command": "qmx session-end" }] }]
+} }
+```
+
+Injection is **scope-keyed** (the current repo, resolved from `cwd` via `git remote`, + global) and
+budgeted to the 10k-char `additionalContext` cap — so one repo's lessons never leak into another's
+session. Promoted lessons live in an **isolated per-repo store** (`~/.qmx/memory/<owner__repo>/`).
+
+**Setting it up** — pull the chat model, wire the hooks, and (optionally) schedule the nightly
+sweep: see step 8 of [`QUICKSTART.md`](./QUICKSTART.md), which points at [`INFRA.md`](./INFRA.md) for
+the running services (the Spark model + the launchd agents).
+
 ## Status
 
-Phase 4 (chats) landing: qmx now indexes your Claude Code **conversation history** alongside code —
-`qmx backfill-chats` for past transcripts and a `Stop` hook (`qmx capture`) for live turns, recalled
-via the `mcp__qmx__recall` tool. Built on the resident **MCP server** (Phase 3), tree-sitter
-chunking, incremental indexing, and hybrid **vector + BM25 → RRF** search — with an optional
-**Qwen3-Reranker** stage (llama.cpp on the Spark GPU; see
+Capabilities #1–#3 implemented: code search, chat recall, and the **learnings/consolidation** tier
+(schema v4; `add-learning`/`lessons`/`consolidate`/`promote` + SessionStart/SessionEnd hooks). qmx
+indexes your Claude Code **conversation history** alongside code — `qmx backfill-chats` for past
+transcripts and a `Stop` hook (`qmx capture`) for live turns, recalled via `mcp__qmx__recall`. Built
+on the resident **MCP server**, tree-sitter chunking, incremental indexing, and hybrid **vector +
+BM25 → RRF** search — with an optional **Qwen3-Reranker** stage (llama.cpp on the Spark GPU; see
 [`plan/qmx-ml-notes.md`](./plan/qmx-ml-notes.md)). See [`plan/`](./plan) for the design.
 
 ## Development
@@ -199,8 +270,9 @@ claude mcp add --transport http qmx http://spark-0e81.local:8765/mcp
 { "mcpServers": { "qmx": { "type": "http", "url": "http://spark-0e81.local:8765/mcp" } } }
 ```
 
-The tools then appear as `mcp__qmx__query`, `mcp__qmx__search_code`, `mcp__qmx__get`,
-`mcp__qmx__status`. (`qmx serve --transport stdio` is available for a local, single-client setup.)
+The tools then appear as `mcp__qmx__query`, `mcp__qmx__search_code`, `mcp__qmx__recall`,
+`mcp__qmx__lessons`, `mcp__qmx__add_learning`, `mcp__qmx__get`, `mcp__qmx__status`.
+(`qmx serve --transport stdio` is available for a local, single-client setup.)
 
 ## License
 
