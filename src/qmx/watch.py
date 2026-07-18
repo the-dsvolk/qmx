@@ -16,9 +16,8 @@ from watchdog.events import (
 )
 from watchdog.observers import Observer
 
-from qmx.chunk.code import language_for_path
 from qmx.embed import Embedder
-from qmx.index import index_paths
+from qmx.index import index_paths, repo_kind
 from qmx.store import Store
 
 log = logging.getLogger("qmx.watch")
@@ -32,28 +31,28 @@ class CodeChangeHandler(FileSystemEventHandler):
         self._embedder = embedder
 
     @staticmethod
-    def _is_code(path: str) -> bool:
-        return bool(path) and language_for_path(path) is not None
+    def _indexable(path: str) -> bool:
+        return bool(path) and repo_kind(Path(path)) is not None
 
     def on_created(self, event: FileSystemEvent) -> None:
-        if not event.is_directory and self._is_code(event.src_path):
+        if not event.is_directory and self._indexable(event.src_path):
             self._reindex(event.src_path)
 
     def on_modified(self, event: FileSystemEvent) -> None:
-        if not event.is_directory and self._is_code(event.src_path):
+        if not event.is_directory and self._indexable(event.src_path):
             self._reindex(event.src_path)
 
     def on_deleted(self, event: FileSystemEvent) -> None:
-        if not event.is_directory and self._is_code(event.src_path):
+        if not event.is_directory and self._indexable(event.src_path):
             self._remove(event.src_path)
 
     def on_moved(self, event: FileSystemEvent) -> None:
         if event.is_directory:
             return
-        if self._is_code(event.src_path):
+        if self._indexable(event.src_path):
             self._remove(event.src_path)
         dest = getattr(event, "dest_path", "")
-        if self._is_code(dest):
+        if self._indexable(dest):
             self._reindex(dest)
 
     def _reindex(self, path: str) -> None:
@@ -64,7 +63,8 @@ class CodeChangeHandler(FileSystemEventHandler):
             log.warning("reindex failed for %s: %s", path, exc)
 
     def _remove(self, path: str) -> None:
-        self._store.remove_document("code", str(Path(path).resolve()))
+        kind = repo_kind(Path(path)) or "code"
+        self._store.remove_document(kind, str(Path(path).resolve()))
         log.info("removed %s", path)
 
 

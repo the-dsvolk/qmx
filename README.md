@@ -97,8 +97,9 @@ flowchart LR
 
 **Keeping code current (`watch`)** — the code counterpart to chat capture. `qmx watch` subscribes to
 OS filesystem events (**macOS FSEvents** via `watchdog`): the kernel *pushes the changed path* — no
-polling, no tree scan. Only recognised code files are (re)indexed, and only the *changed chunks*
-re-embed (content-hash diff); non-code files are ignored:
+polling, no tree scan. Recognised **code** (tree-sitter) and **markdown** (`.md`, indexed as
+`kind=doc`) files are (re)indexed, and only the *changed chunks* re-embed (content-hash diff);
+other files (data, binaries) are ignored:
 
 ```mermaid
 flowchart LR
@@ -107,15 +108,15 @@ flowchart LR
     FSE["FSEvents<br/>pushes the changed path"]
   end
   subgraph W["qmx watch (launchd)"]
-    H{"code file?"}
+    H{"code or .md?"}
     RI["reindex that one file<br/>chunk → hash → embed only NEW chunks"]
     IGN["ignore"]
     DB[("flat KB · SQLite")]
   end
   SAVE --> FSE
   FSE -- "changed path" --> H
-  H -- "yes (.py/.ts/…)" --> RI --> DB
-  H -- "no (.md, data, …)" --> IGN
+  H -- "yes (.py/.ts/.md/…)" --> RI --> DB
+  H -- "no (data / binaries)" --> IGN
 ```
 
 (Delete → the file's chunks are dropped; move → drop old + index new. `busy_timeout` lets watch,
