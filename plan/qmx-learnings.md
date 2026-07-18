@@ -30,6 +30,9 @@ CREATE TABLE learnings (
   importance    REAL NOT NULL,        -- 0..1, USED in retrieval ranking
   source_anchors TEXT,                -- JSON: [{session, transcript_path, line}] citations
   superseded_by INTEGER REFERENCES learnings(learning_id),  -- newer lesson that replaced this
+  reuse_count   INTEGER DEFAULT 0,    -- times fired/injected/confirmed — the promotion gate
+  last_fired_at TEXT,                 -- when last retrieved/injected (for recency + gate)
+  promoted_to   TEXT,                 -- path of the curated memory/*.md it graduated to (NULL = not promoted)
   created_at    TEXT DEFAULT (datetime('now')),
   updated_at    TEXT DEFAULT (datetime('now'))
 );
@@ -93,18 +96,67 @@ flowchart LR
 ## Surfaces
 
 - **CLI:** `qmx consolidate [--session <path>] [--all]`, `qmx lessons <query|--topic> [--type] [-k]`,
-  `qmx add-learning ...` (manual seed / promote-from-review).
+  `qmx lessons --review` (list promotion-eligible), `qmx promote <id> [--project <p>]` (graduate to
+  curated memory), `qmx add-learning ...` (manual seed).
 - **MCP tools:** `lessons(query, type?, k)` (the read door for agents), and optional
   `add_learning(...)` / `consolidate()` write tools. Adds to the existing `query`/`search_code`/
   `recall`/`get`/`status` set.
 - **Retrieval ranking** (`lessons`): `score = w_r·relevance + w_i·importance + w_t·recency`, tunable
   weights; superseded excluded.
 
-## Relationship to the curated `~/.claude/.../memory/`
+## Consumption & promotion to curated memory
 
-qmx **auto-drafts** candidate learnings (with supersede so they self-correct); the hand-curated
-memory files stay the canon. A learning can be **promoted** to a curated memory file when it proves
-durable (and, since memory is now indexed as `kind=doc`, promotion is discoverable both ways).
+Two stores, deliberately separate — and a one-way graduation between them:
+
+| | qmx learnings (`kind=learning`) | Curated `~/.claude/projects/<p>/memory/*.md` |
+|---|---|---|
+| Owner | machine (auto-drafted) | human (hand-picked canon) |
+| Volume | large, self-superseding | small, high-signal |
+| Reaches the agent by | `lessons()` pull + SessionStart inject | **auto-loaded into every session** (MEMORY.md + files) |
+| Trust | probationary | canon |
+
+The asymmetry that drives the design: **curated memory is auto-loaded into *every* session**, so a
+wrong entry there is expensive. Learnings are cheaper (an injected lesson can be ignored). Promotion
+is the bridge — "this lesson earned a seat in the always-loaded canon."
+
+**How learnings are used (two channels):** *pull* — `lessons(query, type?, k)` MCP tool, agent asks
+mid-task; *push* — the `SessionStart` hook injects the top-k scoped lessons.
+
+**Promotion loop (learning → memory), human-gated:**
+
+```mermaid
+flowchart LR
+  E["eligible:<br/>live · importance≥T · reuse_count≥N"] --> R["qmx lessons --review<br/>(human approves)"]
+  R --> P["qmx promote &lt;id&gt;"]
+  P --> D["dedup vs kind=doc memory<br/>(update file vs create)"]
+  D --> W["write memory/*.md<br/>frontmatter + body + MEMORY.md pointer"]
+  W --> S["learning.promoted_to = path<br/>(excluded from injection)"]
+  W -. "next Stop hook" .-> IDX["re-indexed as kind=doc"]
+```
+
+1. **Gate (eligibility):** `live AND importance ≥ T AND reuse_count ≥ N` → surfaces in
+   `qmx lessons --review`. **A human approves each promotion** (canon is loaded everywhere; qmx never
+   auto-edits curated files — it only auto-writes its own DB).
+2. **`qmx promote <id> [--project <p>]`** then:
+   - **Type-maps** the learning to a memory `metadata.type`:
+
+     | learning.type | → memory type | body shape |
+     |---|---|---|
+     | `mistake` / `howto` | `feedback` | statement + **Why:** + **How to apply:** |
+     | `decision` (scoped) | `project` | statement + rationale |
+     | pointer/resource | `reference` | URL / anchor |
+   - **Dedups against canon first** — memory is already indexed as `kind=doc`, so vector-match the
+     learning against existing `memory/*.md` and **update the matching file** rather than duplicate it.
+   - **Writes** valid frontmatter (`name` kebab-slug, `description` = the statement, `metadata.type`),
+     body, `[[links]]` to related memories, **and appends the one-line pointer to `MEMORY.md`**.
+   - **Closes the loop:** sets `learning.promoted_to = <path>` and **excludes promoted learnings from
+     SessionStart injection** (else it double-surfaces — the memory system loads it *and* qmx injects
+     it). The next `Stop` hook re-indexes the new file as `kind=doc`, so it's searchable both ways.
+3. **Reverse direction — canon wins:** during `consolidate`, also vector-match candidates against
+   `kind=doc` memory. A candidate that merely **restates** canon is dropped (no learning minted); one
+   that **contradicts** a curated file is **flagged for review**, never silently superseded. This keeps
+   the repo convention intact: promotion produces a real `.md` (source of truth); the learnings DB
+   stays a rebuildable shadow.
 
 ## Model decision (which chat model, and is an NVFP4 one useful?)
 
@@ -128,6 +180,13 @@ judgment. Its headline gains are exactly this task's inputs: **repo-level reason
 structured output via Ollama's `format`/JSON-schema. Newer and stronger than the 3.5-era 35B-A3B for a
 consolidation judge. This ships the feature.
 
+**Config, not hardcoded.** The consolidation model is read from **`Settings.chat_model`**
+(`~/.qmx/config.toml`, override `QMX_CHAT_MODEL`) — exactly like `embed_model` / `rerank_url` today.
+Code references the setting only; **no model string is hardcoded** in the extract/consolidate calls.
+Update the current default (`chat_model = "qwen3"`) to **`"qwen3.6:35b-a3b"`**, so swapping models
+(or pointing the deferred vLLM judge at a different endpoint via a `chat_url`) is a config edit, never
+a code change.
+
 **NVFP4 models from the [unsloth collection](https://huggingface.co/collections/unsloth/nvfp4) —
 the one place in qmx they could pay off, but deferred.** They are **large generative Qwen/Gemma/GLM,
 safetensors for vLLM/TensorRT-LLM (not GGUF → not Ollama/llama.cpp)**. Because consolidation *rewards*
@@ -149,6 +208,7 @@ path, not a launch dependency.
 | **B** | `extract_learnings` (Qwen) + `qmx consolidate` over a session; `consolidated` cursor | run on a real transcript → sensible decision/mistake/howto lessons; re-run embeds 0 (idempotent) |
 | **C** | dedup + **supersede** (vector-match + Qwen judge) | a corrected lesson supersedes the stale one; superseded excluded from `lessons` |
 | **D** | `SessionEnd` (consolidate) + `SessionStart` (inject) hooks | new lesson appears after a session; next session is injected with relevant lessons |
+| **E** | **Promotion:** `qmx lessons --review` + `qmx promote <id>` (type-map, dedup vs `kind=doc` memory, write frontmatter + MEMORY.md pointer, set `promoted_to`) | approve an eligible lesson → a valid `memory/*.md` appears (updates the matching file, not a dup), its pointer lands in MEMORY.md, and the promoted learning stops being injected |
 
 ## Open questions
 
@@ -157,5 +217,8 @@ path, not a launch dependency.
    was-a-mistake) vs human review.
 3. **Scope/injection** — how aggressively to inject at SessionStart (top-k, token budget) and how to
    match `scope` to the current cwd/project without noise.
-4. **Trust** — a learning can encode a wrong conclusion; supersede + importance + a `qmx lessons
-   --review` promote/retire flow mitigate. Should low-confidence lessons be quarantined until reused?
+4. **Promotion gate tuning** — the eligibility thresholds (`importance ≥ T`, `reuse_count ≥ N`) are
+   TBD; promotion itself is **human-gated** (decided). Should very-high-confidence lessons ever
+   auto-promote, or always pass through `--review`? (v1: always review.)
+5. **Trust** — a learning can encode a wrong conclusion; supersede + importance + the human review
+   gate mitigate. Should low-confidence lessons be quarantined until reused?
