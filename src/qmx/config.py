@@ -54,7 +54,8 @@ class Settings:
     # Qwen model tags (as served by Ollama).
     embed_model: str = "qwen3-embedding"
     rerank_model: str = "qwen3-reranker"
-    chat_model: str = "qwen3"
+    # Consolidation/learnings judge — read from here, never hardcoded (see plan/qmx-learnings.md).
+    chat_model: str = "qwen3.6:35b-a3b"
 
     # Reranker: base URL of a Cohere-style /v1/rerank server (llama.cpp llama-server --reranking).
     # Empty = disabled (RRF-only). e.g. "http://spark-0e81.local:8081".

@@ -147,13 +147,45 @@ flowchart LR
 
 See [plan/qmx-ml-notes.md](./plan/qmx-ml-notes.md) (TD-1) for how the reranker is built and served.
 
+## Learnings (distilled lessons)
+
+Beyond raw recall, qmx distils past chats into a **learnings** tier (`kind=learning`) — reusable
+*decisions*, *mistakes+corrections*, and *how-tos* — deduped/superseded so they self-correct, and
+**proactively injected at session start** so an agent begins already knowing. See
+[`plan/qmx-learnings.md`](./plan/qmx-learnings.md) for the design; the model (a Qwen chat model, e.g.
+`qwen3.6:35b-a3b`) is config-driven via `chat_model`, never hardcoded.
+
+```bash
+qmx add-learning "raise IAM PRs at project level" --type mistake \
+    --detail "bucket-level failed; ask in #platform-security-support" --scope the-dsvolk/qmx
+qmx lessons "how to raise an IAM PR"     # recall, ranked by relevance × importance × recency
+qmx consolidate --session <transcript>   # Qwen distils a chat into lessons (new/update/supersede)
+qmx lessons --review                     # list promotion-eligible lessons
+qmx promote <id>                         # graduate one into per-repo curated memory
+```
+
+**Hooks** (optional, wire in `settings.json` like the `Stop`/capture hook) — inject at start,
+consolidate at end (the latter runs detached so it never blocks session close):
+
+```json
+{ "hooks": {
+    "SessionStart": [{ "matcher": "startup", "hooks": [{ "type": "command", "command": "qmx session-start" }] }],
+    "SessionEnd":   [{ "hooks": [{ "type": "command", "command": "qmx session-end" }] }]
+} }
+```
+
+Injection is **scope-keyed** (the current repo, resolved from `cwd` via `git remote`, + global) and
+budgeted to the 10k-char `additionalContext` cap — so one repo's lessons never leak into another's
+session. Promoted lessons live in an **isolated per-repo store** (`~/.qmx/memory/<owner__repo>/`).
+
 ## Status
 
-Phase 4 (chats) landing: qmx now indexes your Claude Code **conversation history** alongside code —
-`qmx backfill-chats` for past transcripts and a `Stop` hook (`qmx capture`) for live turns, recalled
-via the `mcp__qmx__recall` tool. Built on the resident **MCP server** (Phase 3), tree-sitter
-chunking, incremental indexing, and hybrid **vector + BM25 → RRF** search — with an optional
-**Qwen3-Reranker** stage (llama.cpp on the Spark GPU; see
+Capabilities #1–#3 implemented: code search, chat recall, and the **learnings/consolidation** tier
+(schema v4; `add-learning`/`lessons`/`consolidate`/`promote` + SessionStart/SessionEnd hooks). qmx
+indexes your Claude Code **conversation history** alongside code — `qmx backfill-chats` for past
+transcripts and a `Stop` hook (`qmx capture`) for live turns, recalled via `mcp__qmx__recall`. Built
+on the resident **MCP server**, tree-sitter chunking, incremental indexing, and hybrid **vector +
+BM25 → RRF** search — with an optional **Qwen3-Reranker** stage (llama.cpp on the Spark GPU; see
 [`plan/qmx-ml-notes.md`](./plan/qmx-ml-notes.md)). See [`plan/`](./plan) for the design.
 
 ## Development
@@ -199,8 +231,9 @@ claude mcp add --transport http qmx http://spark-0e81.local:8765/mcp
 { "mcpServers": { "qmx": { "type": "http", "url": "http://spark-0e81.local:8765/mcp" } } }
 ```
 
-The tools then appear as `mcp__qmx__query`, `mcp__qmx__search_code`, `mcp__qmx__get`,
-`mcp__qmx__status`. (`qmx serve --transport stdio` is available for a local, single-client setup.)
+The tools then appear as `mcp__qmx__query`, `mcp__qmx__search_code`, `mcp__qmx__recall`,
+`mcp__qmx__lessons`, `mcp__qmx__add_learning`, `mcp__qmx__get`, `mcp__qmx__status`.
+(`qmx serve --transport stdio` is available for a local, single-client setup.)
 
 ## License
 
