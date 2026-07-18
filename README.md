@@ -22,13 +22,48 @@ Powered by the [Qwen](https://github.com/QwenLM) embedding/rerank models and
 
 ## Architecture
 
-qmx is two cooperating pieces joined by one config knob (`QMX_OLLAMA_URL`):
+**The big picture — three pieces:**
+
+```mermaid
+flowchart LR
+  U["Claude Code / you"]
+
+  subgraph MAC["Your Mac — the client (answers here)"]
+    S["qmx MCP server"]
+    DB[("local index<br/>SQLite: vectors + BM25")]
+    S <--> DB
+  end
+
+  subgraph SPARK["DGX Spark — GPU (models only)"]
+    E["Qwen embeddings"]
+    C["Qwen chat model<br/>(learnings / consolidation)"]
+    R["Qwen reranker"]
+  end
+
+  U -->|"MCP: query · recall · lessons"| S
+  S -->|"embed · rerank"| E
+  S -.->|"rerank top-k"| R
+  S -->|"consolidate chats → lessons"| C
+```
+
+- **DGX Spark (GPU)** — runs the **Qwen models only**: **embeddings**, the **reranker**, and the
+  **chat model** that distils chats into *learnings*. Text is sent for compute; **nothing is stored
+  there**.
+- **Your Mac (the client)** — holds the **local index** (SQLite: `sqlite-vec` vectors + FTS5/BM25)
+  and runs the **MCP server**. It does the actual searching and **answers from the local DB**,
+  calling the Spark only for model compute.
+- **Claude Code (you)** — talks to the Mac's MCP server (`query` / `recall` / `lessons` / …); it
+  never touches the Spark directly.
+
+One config knob (`QMX_OLLAMA_URL`) points the Mac at the Spark. In more detail, qmx is two
+cooperating pieces:
 
 - **qmx** (this tool) — the **index and search**: chunking, the SQLite store (`sqlite-vec` + FTS5),
   hybrid ranking, the CLI, and the MCP server all run **on your machine**.
-- **An Ollama backend** — produces the **embeddings** with a **Qwen** model. It can be the *same*
-  machine, or a GPU box on your LAN (e.g. a DGX Spark). The only thing that crosses to it is the
-  text being embedded; the index and all search stay local.
+- **An Ollama backend** — produces the **embeddings** with a **Qwen** model (and, for the learnings
+  tier, serves the **chat model**; optionally a **reranker**). It can be the *same* machine, or a GPU
+  box on your LAN (e.g. a DGX Spark). The only thing that crosses to it is the text being embedded or
+  consolidated; the index and all search stay local.
 
 So you can run everything on one laptop, or keep the index local and offload embeddings to a GPU box.
 
