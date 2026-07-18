@@ -184,9 +184,36 @@ Claude Code `settings.json` on the Mac — see the **Learnings** section of [`RE
     the `qmx consolidate` / `session-end` hook uses against the Spark's Ollama; must be pulled there).
     It defaults to this value, so the line is optional unless you swap models.
   - **Reranker (optional):** `rerank_url = "http://spark-0e81.local:8081"` enables the cross-encoder.
-- Always-on server: launchd agent `~/Library/LaunchAgents/com.qmx.serve.plist` runs
-  `qmx serve --transport http` (`RunAtLoad` + `KeepAlive`; log `~/.qmx/serve.log`).
 - Claude Code: `claude mcp add --transport http --scope user qmx http://127.0.0.1:8765/mcp`.
+
+**launchd agents live in `~/Library/LaunchAgents/`** — they are **client-side machine state, not in
+the repo** (same as the Spark's systemd units above; the plists are reproduced here in full).
+Install each with `launchctl load -w ~/Library/LaunchAgents/<name>.plist`. Three exist:
+
+`com.qmx.serve.plist` — the always-on MCP server (`RunAtLoad`+`KeepAlive`; log `~/.qmx/serve.log`):
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.qmx.serve</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/YZ0315/.local/bin/qmx</string>
+    <string>serve</string><string>--transport</string><string>http</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/Users/YZ0315/.qmx/serve.log</string>
+  <key>StandardErrorPath</key><string>/Users/YZ0315/.qmx/serve.log</string>
+</dict>
+</plist>
+```
+
+`com.qmx.watch.plist` — keeps `code_roots` reindexed on save; identical shape but
+`ProgramArguments = [qmx, -v, watch]` and log `~/.qmx/watch.log`.
+(`com.qmx.consolidate.plist` — the learnings sweep — is shown in the next section.)
 
 Full step-by-step is in [`QUICKSTART.md`](./QUICKSTART.md).
 
@@ -203,10 +230,32 @@ model). Two mechanisms, installed on the Mac — **no daemon, event-driven + a n
    `session-end` spawns `qmx consolidate` **detached** (never blocks session close); `session-start`
    injects scope-matched lessons. Both are best-effort (exit 0). Alongside the existing `Stop →
    qmx capture` hook.
-2. **Daily sweep** (`~/Library/LaunchAgents/com.qmx.consolidate.plist`) — a launchd catch-all for
-   sessions the hook missed (crashes, backfilled/old transcripts):
-   `qmx consolidate --all`, `StartCalendarInterval` **03:00 daily**, log `~/.qmx/consolidate.log`.
-   Cheap + idempotent — the `consolidated` cursor means it only distils *new* turns.
+2. **Daily sweep** — a launchd catch-all for sessions the hook missed (crashes, backfilled/old
+   transcripts). Runs `qmx consolidate --all` at **03:00 daily**; cheap + idempotent (the
+   `consolidated` cursor means it only distils *new* turns). `~/Library/LaunchAgents/com.qmx.consolidate.plist`:
+
+   ```xml
+   <?xml version="1.0" encoding="UTF-8"?>
+   <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+   <plist version="1.0">
+   <dict>
+     <key>Label</key><string>com.qmx.consolidate</string>
+     <key>ProgramArguments</key>
+     <array>
+       <string>/Users/YZ0315/.local/bin/qmx</string><string>consolidate</string><string>--all</string>
+     </array>
+     <key>StartCalendarInterval</key>
+     <dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>0</integer></dict>
+     <key>RunAtLoad</key><false/>
+     <key>StandardOutPath</key><string>/Users/YZ0315/.qmx/consolidate.log</string>
+     <key>StandardErrorPath</key><string>/Users/YZ0315/.qmx/consolidate.log</string>
+   </dict>
+   </plist>
+   ```
+
+   (`StartCalendarInterval` = fixed clock time; launchd runs it on next wake if the Mac was asleep at
+   03:00 — unlike cron, which would skip it. Swap for `StartInterval` `<integer>21600</integer>` to run
+   every 6 h instead.)
    > Caveat: `--all` has no per-transcript cwd, so swept lessons are **global** (`scope=NULL`); the
    > per-session `SessionEnd` path derives the repo scope from `cwd` and scopes correctly.
 
