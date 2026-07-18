@@ -178,6 +178,10 @@ Injection is **scope-keyed** (the current repo, resolved from `cwd` via `git rem
 budgeted to the 10k-char `additionalContext` cap — so one repo's lessons never leak into another's
 session. Promoted lessons live in an **isolated per-repo store** (`~/.qmx/memory/<owner__repo>/`).
 
+**Setting it up** — pull the chat model, wire the hooks, and (optionally) schedule the nightly
+sweep: see step 8 of [`QUICKSTART.md`](./QUICKSTART.md), which points at [`INFRA.md`](./INFRA.md) for
+the running services (the Spark model + the launchd agents).
+
 ## Status
 
 Capabilities #1–#3 implemented: code search, chat recall, and the **learnings/consolidation** tier
