@@ -80,18 +80,65 @@ flowchart LR
    chunk; mark the source turns `consolidated`.
 4. **Retrieve** (`lessons(query|topic, type?, k)`): vector + BM25 over `kind=learning`, re-ranked by
    **relevance × importance × recency** (not relevance alone), returning lessons **with citations**.
-5. **Inject** (SessionStart): call `lessons` for the current project/topic and surface the top few so
-   the agent starts already knowing "last time bucket-level IAM failed → use project-level."
+5. **Inject** (SessionStart): resolve the current repo from `cwd`, select `scope`-matched + global
+   lessons (see *Relevance & scope*), and surface the top few so the agent starts already knowing
+   "last time bucket-level IAM failed → use project-level."
+
+## Relevance & scope — two signals
+
+Injection and pull answer *relevance* with **different signals**, because they run at different times:
+
+| Channel | When it runs | Query available? | Relevance signal |
+|---|---|---|---|
+| **Inject** (`SessionStart`) | before the first prompt | **no** | **project identity** — `cwd` → repo → `scope` match |
+| **Pull** (`lessons(query)`) | mid-task, on demand | **yes** | **vector + BM25** semantic match (optionally `scope`-filtered) |
+
+The key constraint: **at `SessionStart` there is no query text yet**, so injection *cannot* rank by
+meaning — the only signal is *which project you're in*. Injection is therefore **scope-keyed**;
+semantic relevance is the job of the pull path once the agent has an actual question.
+
+**`cwd` → canonical scope key.** The `SessionStart`/`SessionEnd` hook input includes `cwd`. Resolve it
+to a stable repo identity:
+
+1. Walk up to the git root; read **`git remote get-url origin`** → normalize to a canonical key
+   (`Cruise/xtorch`, `the-dsvolk/qmx`).
+2. **Use the remote, not the directory name.** Worktrees live under paths like
+   `.claude/worktrees/qmx-learnings-plan` — the basename is useless as a key, but the remote is
+   identical across every worktree/clone, so it's the stable identity.
+3. Fallback if no remote: repo-root basename, matched against `code_roots` in config.
+
+**The injection set** (per session), capped at the `SessionStart` **10,000-char `additionalContext`
+budget** (see hooks contract below):
+
+```
+repo   = canonical_key(cwd)                 # e.g. "Cruise/xtorch"
+inject = lessons WHERE scope == repo         # this project's lessons
+       ∪ lessons WHERE scope IS NULL          # global / repo-agnostic lessons
+       (superseded excluded, promoted_to IS NULL)
+rank by importance × recency, fill up to the char budget
+```
+
+So a session in `xtorch` is injected with xtorch lessons + a few globals and **nothing from
+`cpe-intelligence`** — cross-project noise is excluded structurally. An unknown / non-git `cwd` →
+globals only (or nothing).
+
+**Where `scope` comes from.** Each learning is stamped with `scope` at extraction — near-deterministic
+because a Claude Code transcript already lives under `~/.claude/projects/<encoded-cwd>/`, so the
+extractor derives the session's repo (same `git remote` normalization) and sets `scope` to it. The
+Qwen pass may override (a lesson learned in repo A but *about* repo B → `scope = B`); `scope = NULL`
+means the model judged it repo-agnostic (e.g. "always branch before editing").
 
 ## Triggers & wiring (Claude Code hooks)
 
 - **`SessionEnd`** (or a turn counter in `qmx capture`) → `qmx consolidate` on that session's
-  transcript. Consolidation is the heavier batch pass; keep it off the per-turn hot path.
-- **`SessionStart`** → `qmx lessons --scope <cwd-project> --inject` prints relevant lessons into the
-  session context (the "proactive injection" payoff — turns passive lookup into "learn from
-  mistakes").
-- Both are `settings.json` hooks (harness-executed), added via the update-config skill, like the
-  existing `Stop` capture hook.
+  transcript. Consolidation is the heavier batch pass; keep it off the per-turn hot path. **The
+  `SessionEnd` hook blocks session closure until it returns (600 s timeout), so consolidate must be
+  spawned detached** (`nohup … &`, exit immediately) to avoid stalling the session close.
+- **`SessionStart`** (matcher `startup`) → resolve `scope` from `cwd` (above), build the injection set,
+  and return it as JSON `hookSpecificOutput.additionalContext` (the documented context-injection field,
+  max 10,000 chars) — **not** stdout, which is not injected. This is the "proactive injection" payoff.
+- `SessionEnd` receives `session_id` + `transcript_path` + `cwd`; both are `settings.json` hooks
+  (harness-executed), added via the update-config skill, like the existing `Stop` capture hook.
 
 ## Surfaces
 
