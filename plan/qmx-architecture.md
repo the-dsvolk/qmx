@@ -92,7 +92,8 @@ flowchart LR
 ## Capability #3 — the "learning" layer (always-on-memory pattern, localized + improved)
 
 > **Implementation spec:** [qmx-learnings.md](./qmx-learnings.md) — schema, pipeline, hooks, phasing,
-> and the model decision (v1 = Ollama `qwen3`; NVFP4/vLLM as a deferred upgrade). This section is the
+> and the model decision (v1 = Ollama `qwen3.6:35b-a3b`; `Qwen3.5-122B-A10B` NVFP4/vLLM as a deferred
+> upgrade). This section is the
 > design rationale it builds on.
 
 The reference always-on-memory-agent's transferable core is **episodic-write → periodic-LLM-

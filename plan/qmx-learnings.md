@@ -118,21 +118,28 @@ embedder/reranker, where it doesn't). Two facts shape the choice:
   **throughput doesn't matter**; judgment does.
 - The Spark has **~128 GB unified memory** — a mid-size model at Q8/BF16 fits with huge headroom.
 
-**v1 — `qwen3` chat on the existing Ollama stack (recommended).** Reuse `Settings.chat_model` +
-Ollama (already serving embeddings on the Spark). Size ~**14B–32B** (GGUF Q8) — ample for
-extract/consolidate summarization + JSON, **no new serving infra**, structured output via Ollama's
-`format`/JSON-schema. This ships the feature.
+**v1 — [`qwen3.6:35b-a3b`](https://ollama.com/library/qwen3.6) on the existing Ollama stack
+(recommended).** Qwen3.6 (Apr 2026, [model card](https://huggingface.co/Qwen/Qwen3.6-35B-A3B),
+[release notes](https://qwen.ai/blog?id=qwen3.6-35b-a3b)) is a **MoE — 35B total / 3B active** — so it
+runs at small-model speed (~20 GB Q4, trivial in the Spark's 128 GB) while delivering big-model
+judgment. Its headline gains are exactly this task's inputs: **repo-level reasoning + agentic coding**
+(the transcripts *are* coding sessions) and **thinking-preservation across turns**. Reuse
+`Settings.chat_model` + Ollama (already serving embeddings on the Spark) — **no new serving infra**,
+structured output via Ollama's `format`/JSON-schema. Newer and stronger than the 3.5-era 35B-A3B for a
+consolidation judge. This ships the feature.
 
 **NVFP4 models from the [unsloth collection](https://huggingface.co/collections/unsloth/nvfp4) —
-the one place in qmx they could pay off, but deferred.** They are **large generative Qwen/Gemma/GLM
-(≈12B–120B), safetensors for vLLM/TensorRT-LLM (not GGUF → not Ollama/llama.cpp)**. Because
-consolidation *rewards* better judgment, a 70B–120B judge would produce higher-quality, better-
-deduped lessons — and NVFP4 on the GB10 (Blackwell/sm_121, native FP4) runs such a model fast and
-compact. **But:** (a) it needs standing up **vLLM** (a new serving stack); (b) with 128 GB you can
-run a 32B at Q8/BF16 on Ollama *without* NVFP4, so NVFP4 buys **speed/room, not feasibility**; and
-(c) throughput is irrelevant for a batch job. **Decision: v1 uses Ollama `qwen3` (14–32B).** Only if
-v1 lesson quality proves insufficient do we move *the consolidation model specifically* to a
-**70B–120B NVFP4 Qwen on vLLM** — a documented upgrade path, not a launch dependency.
+the one place in qmx they could pay off, but deferred.** They are **large generative Qwen/Gemma/GLM,
+safetensors for vLLM/TensorRT-LLM (not GGUF → not Ollama/llama.cpp)**. Because consolidation *rewards*
+better judgment, a heavier judge would produce higher-quality, better-deduped lessons — and NVFP4 on
+the GB10 (Blackwell/sm_121, native FP4) runs such a model fast and compact. The concrete deferred pick
+is **`Qwen3.5-122B-A10B` in NVFP4** (122B total / 10B active; ~60 GB in FP4 — fits 128 GB) — the
+max-judgment consolidator. **But:** (a) it needs standing up **vLLM** (a new serving stack); (b) the
+3.6-35B-A3B v1 already runs on Ollama *without* NVFP4, so NVFP4 buys **speed/room + a bigger judge, not
+feasibility**; and (c) throughput is irrelevant for a batch job. **Decision: v1 uses
+`qwen3.6:35b-a3b` on Ollama.** Only if v1 lesson quality proves insufficient do we move *the
+consolidation model specifically* to **`Qwen3.5-122B-A10B` NVFP4 on vLLM** — a documented upgrade
+path, not a launch dependency.
 
 ## Phasing
 
