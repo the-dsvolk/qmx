@@ -230,13 +230,19 @@ journalctl --user -u ollama -n 50
 loginctl show-user "$USER" -p Linger       # expect Linger=yes
 ```
 
-**Mac (launchd):**
+**Mac (launchd)** — three agents: `com.qmx.serve` (MCP), `com.qmx.watch` (code reindex),
+`com.qmx.consolidate` (daily learnings sweep, 03:00):
 
 ```bash
-launchctl list | grep qmx
+launchctl list | grep qmx                                     # serve, watch, consolidate
+# swap com.qmx.serve for .watch / .consolidate as needed:
 launchctl unload ~/Library/LaunchAgents/com.qmx.serve.plist   # stop
 launchctl load  -w ~/Library/LaunchAgents/com.qmx.serve.plist # start / enable at login
 tail -f ~/.qmx/serve.log
+
+# learnings daily sweep (com.qmx.consolidate):
+launchctl start com.qmx.consolidate                           # run the --all sweep now
+tail -f ~/.qmx/consolidate.log
 ```
 
 ## Rebuilding from scratch
