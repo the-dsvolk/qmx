@@ -155,16 +155,47 @@ means the model judged it repo-agnostic (e.g. "always branch before editing").
 
 Two stores, deliberately separate — and a one-way graduation between them:
 
-| | qmx learnings (`kind=learning`) | Curated `~/.claude/projects/<p>/memory/*.md` |
+| | qmx learnings (`kind=learning`) | Curated memory (**per-repo** md files) |
 |---|---|---|
 | Owner | machine (auto-drafted) | human (hand-picked canon) |
 | Volume | large, self-superseding | small, high-signal |
-| Reaches the agent by | `lessons()` pull + SessionStart inject | **auto-loaded into every session** (MEMORY.md + files) |
+| Reaches the agent by | `lessons()` pull + SessionStart inject | **injected every session** (per-repo `MEMORY.md` + files) |
 | Trust | probationary | canon |
 
-The asymmetry that drives the design: **curated memory is auto-loaded into *every* session**, so a
+The asymmetry that drives the design: **curated memory is loaded into *every* session**, so a
 wrong entry there is expensive. Learnings are cheaper (an injected lesson can be ignored). Promotion
 is the bridge — "this lesson earned a seat in the always-loaded canon."
+
+### Per-project isolation (memory store keyed by repo)
+
+**Each GitHub project gets its own isolated memory** — repo A's md files never mix with repo B's, in
+storage *or* retrieval. The isolation boundary is the **canonical repo key** (the `git remote`
+normalization from *Relevance & scope*), not the cwd path — so all worktrees/clones of one repo share
+one coherent store, and two different repos never commingle.
+
+```
+~/.qmx/memory/
+  Cruise__xtorch/            MEMORY.md + *.md   # scope = "Cruise/xtorch"
+  the-dsvolk__qmx/           MEMORY.md + *.md   # scope = "the-dsvolk/qmx"
+  _global/                   MEMORY.md + *.md   # scope = NULL (repo-agnostic)
+```
+
+- **Storage isolation:** `qmx promote` writes into the current repo's dir (`_global/` for `scope=NULL`
+  lessons — this resolves the earlier "where does a global lesson go" question). Each dir has its own
+  `MEMORY.md` index.
+- **Retrieval isolation:** SessionStart injection loads **only** the current repo's dir + `_global` (the
+  scope filter already specced), so no cross-project bleed. These files are indexed as `kind=doc` for
+  search, tagged with their `scope`.
+- **Worktree-stable:** because the key is the remote, promoting from `.claude/worktrees/qmx-…` lands in
+  `the-dsvolk__qmx/`, not a per-worktree dir.
+- *(Optional, config)* the per-repo store can instead target an **in-repo** dir (e.g. `.qmx/memory/`,
+  committed with the project) for team-shared canon; default is the home-dir store above, to avoid
+  writing into source repos.
+
+> Note: this per-repo store is qmx's promotion target and injection source; it is distinct from
+> Claude Code's native `~/.claude/projects/<cwd>/memory/` (which is keyed by cwd and thus
+> worktree-fragmented). qmx still indexes those native files as `kind=doc`, but graduates learnings
+> into the repo-keyed store so isolation holds across worktrees.
 
 **How learnings are used (two channels):** *pull* — `lessons(query, type?, k)` MCP tool, agent asks
 mid-task; *push* — the `SessionStart` hook injects the top-k scoped lessons.
@@ -175,8 +206,8 @@ mid-task; *push* — the `SessionStart` hook injects the top-k scoped lessons.
 flowchart LR
   E["eligible:<br/>live · importance≥T · reuse_count≥N"] --> R["qmx lessons --review<br/>(human approves)"]
   R --> P["qmx promote &lt;id&gt;"]
-  P --> D["dedup vs kind=doc memory<br/>(update file vs create)"]
-  D --> W["write memory/*.md<br/>frontmatter + body + MEMORY.md pointer"]
+  P --> D["dedup vs this repo's kind=doc memory<br/>(update file vs create)"]
+  D --> W["write ~/.qmx/memory/&lt;repo-key&gt;/*.md<br/>frontmatter + body + per-repo MEMORY.md"]
   W --> S["learning.promoted_to = path<br/>(excluded from injection)"]
   W -. "next Stop hook" .-> IDX["re-indexed as kind=doc"]
 ```
@@ -192,10 +223,12 @@ flowchart LR
      | `mistake` / `howto` | `feedback` | statement + **Why:** + **How to apply:** |
      | `decision` (scoped) | `project` | statement + rationale |
      | pointer/resource | `reference` | URL / anchor |
-   - **Dedups against canon first** — memory is already indexed as `kind=doc`, so vector-match the
-     learning against existing `memory/*.md` and **update the matching file** rather than duplicate it.
-   - **Writes** valid frontmatter (`name` kebab-slug, `description` = the statement, `metadata.type`),
-     body, `[[links]]` to related memories, **and appends the one-line pointer to `MEMORY.md`**.
+   - **Dedups against this repo's canon first** — memory is already indexed as `kind=doc`, so
+     vector-match the learning against the current repo's `memory/*.md` and **update the matching file**
+     rather than duplicate it.
+   - **Writes** into the repo-keyed store `~/.qmx/memory/<repo-key>/` (`_global/` for `scope=NULL`):
+     valid frontmatter (`name` kebab-slug, `description` = the statement, `metadata.type`), body,
+     `[[links]]` to related memories, **and appends the one-line pointer to that dir's `MEMORY.md`**.
    - **Closes the loop:** sets `learning.promoted_to = <path>` and **excludes promoted learnings from
      SessionStart injection** (else it double-surfaces — the memory system loads it *and* qmx injects
      it). The next `Stop` hook re-indexes the new file as `kind=doc`, so it's searchable both ways.
@@ -255,7 +288,7 @@ path, not a launch dependency.
 | **B** | `extract_learnings` (Qwen) + `qmx consolidate` over a session; `consolidated` cursor | run on a real transcript → sensible decision/mistake/howto lessons; re-run embeds 0 (idempotent) |
 | **C** | dedup + **supersede** (vector-match + Qwen judge) | a corrected lesson supersedes the stale one; superseded excluded from `lessons` |
 | **D** | `SessionEnd` (consolidate) + `SessionStart` (inject) hooks | new lesson appears after a session; next session is injected with relevant lessons |
-| **E** | **Promotion:** `qmx lessons --review` + `qmx promote <id>` (type-map, dedup vs `kind=doc` memory, write frontmatter + MEMORY.md pointer, set `promoted_to`) | approve an eligible lesson → a valid `memory/*.md` appears (updates the matching file, not a dup), its pointer lands in MEMORY.md, and the promoted learning stops being injected |
+| **E** | **Promotion + per-repo isolation:** repo-keyed store `~/.qmx/memory/<repo-key>/` (+ `_global/`); `qmx lessons --review` + `qmx promote <id>` (type-map, dedup vs this repo's `kind=doc` memory, write frontmatter + per-repo MEMORY.md pointer, set `promoted_to`) | approve an eligible lesson in `xtorch` → a valid md lands in `Cruise__xtorch/` (updates the matching file, not a dup) with its pointer in that dir's MEMORY.md; promoting from a worktree lands in the same repo dir; a `cpe-intelligence` session is never injected with xtorch's files; the promoted learning stops being injected |
 
 ## Open questions
 
