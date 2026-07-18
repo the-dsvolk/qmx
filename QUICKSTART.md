@@ -90,9 +90,14 @@ Guidance:
 ## 4. Index a repo and search it
 
 ```bash
-qmx index ~/code/my-project        # walks code files, embeds via the Spark, writes ~/.qmx/index.db
+qmx index ~/code/my-project        # walks code (kind=code) + markdown (.md, kind=doc), writes ~/.qmx/index.db
 qmx query "where do we retry failed requests" -k 5
+qmx query "egress quota" --kind doc         # search only docs (e.g. a repo's kb/*.md)
 ```
+
+Code is chunked AST-aware (tree-sitter); `.md` docs are chunked by headings and stored as
+`kind=doc`, so a repo's `kb/`, READMEs, and design notes are searchable too (unified `query` returns
+both; `--kind code`/`--kind doc` filters).
 
 Re-running `qmx index` is incremental — only changed chunks re-embed, deleted files are dropped.
 

@@ -65,15 +65,16 @@ def indexed(repo):
     store.close()
 
 
-def test_iter_source_files_prunes_junk_and_noncode(repo):
+def test_iter_source_files_prunes_junk_indexes_code_and_md(repo):
     files = {p.name for p in iter_source_files(repo)}
-    assert files == {"net.py", "math_utils.py", "strings.py"}
+    # code + markdown are indexed; .git (dotdir) is pruned, data/binaries ignored
+    assert files == {"net.py", "math_utils.py", "strings.py", "README.md"}
 
 
 def test_index_stats(indexed):
     _, _, stats = indexed
     assert isinstance(stats, IndexStats)
-    assert stats.files_indexed == 3
+    assert stats.files_indexed == 4  # 3 .py + README.md
     assert stats.chunks_added >= 4  # 4 functions across the files
     assert stats.errors == []
 
@@ -91,7 +92,7 @@ def test_reindex_unchanged_is_skipped(indexed, repo):
     store, embedder, _ = indexed
     stats2 = index_paths([repo], store, embedder)
     assert stats2.files_indexed == 0
-    assert stats2.files_skipped == 3
+    assert stats2.files_skipped == 4
     assert stats2.chunks_added == 0
 
 

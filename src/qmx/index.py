@@ -36,6 +36,18 @@ EXCLUDE_DIRS = frozenset(
 )  # fmt: skip
 MAX_FILE_BYTES = 1_000_000  # skip files larger than ~1 MB (logged, not silent)
 
+# Markdown docs indexed from repos as kind="doc" (chunked by chunk_markdown, not tree-sitter).
+DOC_EXTS = frozenset({".md", ".markdown"})
+
+
+def repo_kind(path: Path) -> str | None:
+    """Index kind for a repo file: ``code`` (tree-sitter), ``doc`` (markdown), or ``None``."""
+    if language_for_path(path) is not None:
+        return "code"
+    if Path(path).suffix.lower() in DOC_EXTS:
+        return "doc"
+    return None
+
 
 @dataclass(slots=True)
 class IndexStats:
@@ -71,16 +83,16 @@ def reindex(
 
 
 def iter_source_files(root: Path) -> Iterator[Path]:
-    """Yield indexable code files under ``root`` (a dir or a single file), pruning junk dirs."""
+    """Yield indexable files (code + markdown) under ``root``, pruning junk dirs."""
     if root.is_file():
-        if language_for_path(root) is not None:
+        if repo_kind(root) is not None:
             yield root
         return
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in EXCLUDE_DIRS and not d.startswith(".")]
         for name in filenames:
             path = Path(dirpath) / name
-            if language_for_path(path) is not None:
+            if repo_kind(path) is not None:
                 yield path
 
 
@@ -115,20 +127,27 @@ def _index_file(
         log.info("skip oversized %s (%d bytes)", file_path, size)
         return
 
+    kind = repo_kind(file_path)
+    if kind is None:
+        return
+
     text = file_path.read_text(encoding="utf-8", errors="replace")
     path_key = str(file_path)
     file_hash = hash_text(text)
-    if not force and store.document_hash("code", path_key) == file_hash:
+    if not force and store.document_hash(kind, path_key) == file_hash:
         stats.files_skipped += 1
         return
 
-    chunks = chunk_code(text, language_for_path(file_path))
+    # Route by kind: tree-sitter for code, markdown chunker for docs.
+    chunks = (
+        chunk_code(text, language_for_path(file_path)) if kind == "code" else chunk_markdown(text)
+    )
     # Embed missing content BEFORE writing the document, so a backend failure persists nothing
     # (the file's file_hash is never recorded -> a later run re-processes it, not silently skipped).
     new_embeddings = embed_missing(store, embedder, chunks)
 
     doc_id = store.upsert_document(
-        kind="code", path=path_key, repo=repo, mtime=file_path.stat().st_mtime, file_hash=file_hash
+        kind=kind, path=path_key, repo=repo, mtime=file_path.stat().st_mtime, file_hash=file_hash
     )
     result = store.reindex_document(doc_id, chunks, new_embeddings)
 
@@ -141,11 +160,12 @@ def _index_file(
 
 def _prune_deleted(root: Path, seen: set[str], store: Store, stats: IndexStats) -> None:
     prefix = str(root) + os.sep
-    for doc_id, path in store.documents_under("code", prefix):
-        if path not in seen:
-            stats.chunks_orphaned += store.remove_document_by_id(doc_id)
-            stats.files_removed += 1
-            log.info("removed deleted file %s", path)
+    for kind in ("code", "doc"):
+        for doc_id, path in store.documents_under(kind, prefix):
+            if path not in seen:
+                stats.chunks_orphaned += store.remove_document_by_id(doc_id)
+                stats.files_removed += 1
+                log.info("removed deleted file %s", path)
 
 
 # -- chats (kind="chat") -----------------------------------------------------------------------
