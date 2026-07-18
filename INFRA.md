@@ -148,13 +148,22 @@ just pull the model:
 
 ```bash
 export OLLAMA_HOST=127.0.0.1:11434
-~/.local/ollama/bin/ollama pull qwen3.6:35b-a3b   # MoE 35B/3B-active; ~20 GB, fits the ~118 GB VRAM
+~/.local/ollama/bin/ollama pull qwen3.6:35b-a3b   # MoE 35B/3B-active; ~23 GB, fits the ~118 GB VRAM
 ~/.local/ollama/bin/ollama list                   # confirm it appears alongside qwen3-embedding:0.6b
 ```
 
-- **Config-driven, never hardcoded.** The model is read from `chat_model` (default
-  `qwen3.6:35b-a3b`; override `QMX_CHAT_MODEL` or `chat_model` in `~/.qmx/config.toml`). To swap
-  models, pull the new tag and change that one value — no code change.
+> **Verified working (2026-07-18).** Pulled on the Spark (`qwen3.6:35b-a3b`, 23 GB, MoE) and served by
+> the shared Ollama. A JSON-constrained `/api/chat` call — the exact `think=false` + `format` path
+> `qmx consolidate` uses — returns a valid `{"learnings":[…]}` extraction. First call ≈44 s (includes
+> the cold-start load of the model into VRAM); warm calls are much faster. The real extract path also
+> constrains `type` to `decision|mistake|howto` via the JSON schema (and drops any that slip through).
+
+- **Where it's configured — on the client, not here.** Consolidation runs where the CLI/hooks run
+  (the Mac), talking to *this* Ollama over `QMX_OLLAMA_URL`; the Spark's resident MCP server never
+  calls the chat model (it only serves retrieval). So the Spark just needs the model **pulled**; the
+  model *name* is set on the Mac in **`~/.qmx/config.toml`** (`chat_model = "qwen3.6:35b-a3b"`, or
+  `QMX_CHAT_MODEL`) — see the Mac section below. Default is `qwen3.6:35b-a3b`, never hardcoded; to
+  swap models, pull the new tag on the Spark and change that one value.
 - **Batch, low-QPS.** Consolidation is a few calls at session end, so throughput is irrelevant;
   `session-end` runs it **detached** so it never blocks a session closing. Nothing is resident.
 - **Deferred upgrade (only if v1 lessons are weak):** a `Qwen3.5-122B-A10B` in **NVFP4** on a
@@ -170,6 +179,10 @@ Claude Code `settings.json` on the Mac — see the **Learnings** section of [`RE
 - Config `~/.qmx/config.toml`: `ollama_url = "http://spark-0e81.local:11434"`,
   `embed_model = "qwen3-embedding:0.6b"`, `embed_dim = 1024`, `mcp_host = "127.0.0.1"`,
   `mcp_port = 8765`. Index at `~/.qmx/index.db`.
+  - **Learnings model:** `chat_model = "qwen3.6:35b-a3b"` (the consolidation judge — this is the one
+    the `qmx consolidate` / `session-end` hook uses against the Spark's Ollama; must be pulled there).
+    It defaults to this value, so the line is optional unless you swap models.
+  - **Reranker (optional):** `rerank_url = "http://spark-0e81.local:8081"` enables the cross-encoder.
 - Always-on server: launchd agent `~/Library/LaunchAgents/com.qmx.serve.plist` runs
   `qmx serve --transport http` (`RunAtLoad` + `KeepAlive`; log `~/.qmx/serve.log`).
 - Claude Code: `claude mcp add --transport http --scope user qmx http://127.0.0.1:8765/mcp`.
