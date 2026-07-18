@@ -139,6 +139,31 @@ uvx --from "huggingface_hub[cli]" hf download ggml-org/Qwen3-Reranker-0.6B-Q8_0-
 `-b/-ub 8192` is required — the default 512 rejects long chunks (HTTP 500). Endpoint:
 `http://spark-0e81.local:8081/v1/rerank`. Clients enable it with `rerank_url` (off by default).
 
+## Spark — learnings/consolidation model (chat, GPU)
+
+The learnings tier (`qmx consolidate` / `session-end`) distils chats into lessons with a **Qwen chat
+model** — the one qmx component where model quality matters (judgment: what's a durable lesson, is
+this a dup or a supersede?). It runs on the **same Ollama service** as embeddings (no new unit) —
+just pull the model:
+
+```bash
+export OLLAMA_HOST=127.0.0.1:11434
+~/.local/ollama/bin/ollama pull qwen3.6:35b-a3b   # MoE 35B/3B-active; ~20 GB, fits the ~118 GB VRAM
+~/.local/ollama/bin/ollama list                   # confirm it appears alongside qwen3-embedding:0.6b
+```
+
+- **Config-driven, never hardcoded.** The model is read from `chat_model` (default
+  `qwen3.6:35b-a3b`; override `QMX_CHAT_MODEL` or `chat_model` in `~/.qmx/config.toml`). To swap
+  models, pull the new tag and change that one value — no code change.
+- **Batch, low-QPS.** Consolidation is a few calls at session end, so throughput is irrelevant;
+  `session-end` runs it **detached** so it never blocks a session closing. Nothing is resident.
+- **Deferred upgrade (only if v1 lessons are weak):** a `Qwen3.5-122B-A10B` in **NVFP4** on a
+  **vLLM** server (NVFP4 ≠ GGUF → not Ollama). Point `chat_model`/`QMX_OLLAMA_URL` at it if built.
+  See [`plan/qmx-learnings.md`](./plan/qmx-learnings.md) (*Model decision*).
+
+Client-side hooks that call this model (`SessionStart` inject, `SessionEnd` consolidate) are wired in
+Claude Code `settings.json` on the Mac — see the **Learnings** section of [`README.md`](./README.md).
+
 ## Mac — local qmx (Architecture B: index local, embed on the Spark)
 
 - Install: `uv tool install "git+https://github.com/the-dsvolk/qmx"` → `~/.local/bin/qmx`.
