@@ -21,6 +21,7 @@ from qmx.index import backfill_chats, index_memory, index_paths, index_transcrip
 from qmx.learnings import add_learning, lessons
 from qmx.rerank import make_reranker
 from qmx.search import search
+from qmx.session import session_end, session_start
 from qmx.store import Store, StoreSchemaMismatch
 from qmx.watch import watch
 
@@ -89,6 +90,20 @@ def _cmd_backfill_chats(settings: Settings, args: argparse.Namespace) -> int:
 def _cmd_capture(settings: Settings, args: argparse.Namespace) -> int:
     # Stop-hook entrypoint: hook JSON arrives on stdin. Best-effort; never fails a turn.
     return capture(sys.stdin.read(), settings)
+
+
+def _cmd_session_start(settings: Settings, args: argparse.Namespace) -> int:
+    # SessionStart hook: emit hookSpecificOutput.additionalContext JSON (or nothing). Never fails.
+    out = session_start(sys.stdin.read(), settings)
+    if out:
+        print(out)
+    return 0
+
+
+def _cmd_session_end(settings: Settings, args: argparse.Namespace) -> int:
+    # SessionEnd hook: spawn a detached consolidate so it never blocks session close. Never fails.
+    session_end(sys.stdin.read(), settings)
+    return 0
 
 
 def _cmd_refresh(settings: Settings, args: argparse.Namespace) -> int:
@@ -357,6 +372,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("capture", help="Stop-hook entrypoint: index the transcript named on stdin")
 
+    sub.add_parser("session-start", help="SessionStart hook: inject relevant lessons (stdin JSON)")
+    sub.add_parser("session-end", help="SessionEnd hook: detached consolidate (stdin JSON)")
+
     p_mem = sub.add_parser("index-memory", help="index Claude memory files (kind=memory)")
     p_mem.add_argument("--force", action="store_true", help="re-index unchanged memory files too")
 
@@ -421,6 +439,8 @@ _COMMANDS = {
     "index": _cmd_index,
     "backfill-chats": _cmd_backfill_chats,
     "capture": _cmd_capture,
+    "session-start": _cmd_session_start,
+    "session-end": _cmd_session_end,
     "index-memory": _cmd_index_memory,
     "refresh": _cmd_refresh,
     "query": _cmd_query,
