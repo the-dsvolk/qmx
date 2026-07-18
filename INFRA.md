@@ -153,10 +153,11 @@ export OLLAMA_HOST=127.0.0.1:11434
 ```
 
 > **Verified working (2026-07-18).** Pulled on the Spark (`qwen3.6:35b-a3b`, 23 GB, MoE) and served by
-> the shared Ollama. A JSON-constrained `/api/chat` call — the exact `think=false` + `format` path
-> `qmx consolidate` uses — returns a valid `{"learnings":[…]}` extraction. First call ≈44 s (includes
-> the cold-start load of the model into VRAM); warm calls are much faster. The real extract path also
-> constrains `type` to `decision|mistake|howto` via the JSON schema (and drops any that slip through).
+> the shared Ollama. Verified **end-to-end from the client**: on the Mac, `Settings.load()` →
+> `OllamaChat` → the production `extract_learnings` path (`think=false` + schema-constrained `format`)
+> reaches the Spark over `QMX_OLLAMA_URL` and returns a valid `{"learnings":[…]}` extraction with
+> `type` correctly on-enum (`decision|mistake|howto`). Warm round-trip ≈10 s; first (cold) call ≈44 s
+> incl. loading the model into VRAM.
 
 - **Where it's configured — on the client, not here.** Consolidation runs where the CLI/hooks run
   (the Mac), talking to *this* Ollama over `QMX_OLLAMA_URL`; the Spark's resident MCP server never
