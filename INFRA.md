@@ -190,6 +190,32 @@ Claude Code `settings.json` on the Mac — see the **Learnings** section of [`RE
 
 Full step-by-step is in [`QUICKSTART.md`](./QUICKSTART.md).
 
+## Mac — learnings triggers (what runs consolidation "constantly")
+
+Consolidation runs on the **client** (transcripts + index are here; it calls the Spark only for the
+model). Two mechanisms, installed on the Mac — **no daemon, event-driven + a nightly safety net:**
+
+1. **Claude Code hooks** (`~/.claude/settings.json`) — the primary, per-session trigger:
+   ```json
+   "SessionStart": [{ "matcher": "startup", "hooks": [{ "type": "command", "command": "/Users/YZ0315/.local/bin/qmx session-start" }] }],
+   "SessionEnd":   [{ "hooks": [{ "type": "command", "command": "/Users/YZ0315/.local/bin/qmx session-end" }] }]
+   ```
+   `session-end` spawns `qmx consolidate` **detached** (never blocks session close); `session-start`
+   injects scope-matched lessons. Both are best-effort (exit 0). Alongside the existing `Stop →
+   qmx capture` hook.
+2. **Daily sweep** (`~/Library/LaunchAgents/com.qmx.consolidate.plist`) — a launchd catch-all for
+   sessions the hook missed (crashes, backfilled/old transcripts):
+   `qmx consolidate --all`, `StartCalendarInterval` **03:00 daily**, log `~/.qmx/consolidate.log`.
+   Cheap + idempotent — the `consolidated` cursor means it only distils *new* turns.
+   > Caveat: `--all` has no per-transcript cwd, so swept lessons are **global** (`scope=NULL`); the
+   > per-session `SessionEnd` path derives the repo scope from `cwd` and scopes correctly.
+
+Manage: `launchctl load -w|unload ~/Library/LaunchAgents/com.qmx.consolidate.plist`;
+`launchctl start com.qmx.consolidate` to run the sweep now; `tail -f ~/.qmx/consolidate.log`.
+Requires the installed `qmx` to include the learnings commands (`uv tool upgrade qmx` once the
+learnings PR is on `main`). **Verified:** consolidating a real session produced 7 scoped lessons in
+~32 s, queryable via `qmx lessons`.
+
 ---
 
 ## Managing it
