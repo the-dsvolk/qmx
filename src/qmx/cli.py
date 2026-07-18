@@ -16,6 +16,7 @@ from qmx.capture import capture
 from qmx.config import Settings
 from qmx.embed import EmbedBackendError, OllamaEmbedder
 from qmx.index import backfill_chats, index_memory, index_paths
+from qmx.learnings import add_learning, lessons
 from qmx.rerank import make_reranker
 from qmx.search import search
 from qmx.store import Store, StoreSchemaMismatch
@@ -242,6 +243,58 @@ def _cmd_query(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_add_learning(settings: Settings, args: argparse.Namespace) -> int:
+    try:
+        with _open_store(settings) as store, OllamaEmbedder(settings) as embedder:
+            learning_id = add_learning(
+                store,
+                embedder,
+                type=args.type,
+                statement=args.statement,
+                topic=args.topic,
+                scope=args.scope,
+                detail=args.detail,
+                importance=args.importance,
+            )
+    except (StoreSchemaMismatch, EmbedBackendError, ValueError) as exc:
+        print(f"add-learning failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"added learning #{learning_id} [{args.type}]: {args.statement}")
+    return 0
+
+
+def _cmd_lessons(settings: Settings, args: argparse.Namespace) -> int:
+    reranker = make_reranker(settings)
+    try:
+        with _open_store(settings) as store, OllamaEmbedder(settings) as embedder:
+            results = lessons(
+                store,
+                embedder,
+                args.query,
+                k=args.k,
+                type=args.type,
+                scope=args.scope,
+                reranker=reranker,
+            )
+    except (StoreSchemaMismatch, EmbedBackendError) as exc:
+        print(f"lessons failed: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(results, indent=2))
+        return 0
+    if not results:
+        print("(no lessons)")
+        return 0
+    for i, le in enumerate(results, 1):
+        scope = le["scope"] or "global"
+        print(f"{i:>2}. [{le['score']:.4f}] #{le['learning_id']} ({le['type']}/{scope}) "
+              f"imp={le['importance']}")
+        print(f"    {le['statement']}")
+        if le["detail"]:
+            print(f"      ↳ {le['detail']}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="qmx", description="Query Memory indeX")
     parser.add_argument("-v", "--verbose", action="store_true", help="log indexing detail")
@@ -274,6 +327,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_query.add_argument("-k", type=int, default=5, help="number of results (default 5)")
     p_query.add_argument("--kind", default=None, help="filter by kind (code|doc|chat|learning)")
 
+    p_add = sub.add_parser("add-learning", help="record a distilled lesson (kind=learning)")
+    p_add.add_argument("statement", help="the lesson, one crisp sentence")
+    p_add.add_argument(
+        "--type", choices=["decision", "mistake", "howto"], required=True, help="lesson type"
+    )
+    p_add.add_argument("--detail", default=None, help="why / the correction / the better way")
+    p_add.add_argument("--topic", default=None, help="short slug for filtering/injection")
+    p_add.add_argument("--scope", default=None, help="repo key it applies to (omit = global)")
+    p_add.add_argument("--importance", type=float, default=0.5, help="0..1 (default 0.5)")
+
+    p_les = sub.add_parser("lessons", help="recall distilled lessons (ranked)")
+    p_les.add_argument("query", help="what to recall lessons about")
+    p_les.add_argument("-k", type=int, default=5, help="number of lessons (default 5)")
+    p_les.add_argument(
+        "--type", choices=["decision", "mistake", "howto"], default=None, help="filter by type"
+    )
+    p_les.add_argument("--scope", default=None, help="filter to a repo key (+ global)")
+    p_les.add_argument("--json", action="store_true", help="emit JSON instead of text")
+
     p_watch = sub.add_parser("watch", help="watch path(s) (or code_roots) and keep the index live")
     p_watch.add_argument(
         "paths", nargs="*", help="files/directories to watch (default: config code_roots)"
@@ -304,6 +376,8 @@ _COMMANDS = {
     "index-memory": _cmd_index_memory,
     "refresh": _cmd_refresh,
     "query": _cmd_query,
+    "add-learning": _cmd_add_learning,
+    "lessons": _cmd_lessons,
     "watch": _cmd_watch,
     "sources": _cmd_sources,
     "remove": _cmd_remove,

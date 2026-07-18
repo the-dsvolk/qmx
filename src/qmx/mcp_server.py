@@ -41,6 +41,38 @@ def build_server(settings: Settings, service: QmxService | None = None) -> FastM
         return svc.recall(text, k=k)
 
     @server.tool()
+    def lessons(text: str, k: int = 5, type: str | None = None) -> list[dict]:
+        """Recall distilled **lessons** — decisions, mistakes+corrections, how-tos learned before.
+
+        Higher-signal than raw chat recall: ranked by relevance × importance × recency, each with
+        citations. ``type`` filters ``decision`` | ``mistake`` | ``howto``.
+        """
+        return svc.lessons(text, k=k, type=type)
+
+    @server.tool()
+    def add_learning(
+        type: str,
+        statement: str,
+        detail: str | None = None,
+        topic: str | None = None,
+        scope: str | None = None,
+        importance: float = 0.5,
+    ) -> dict:
+        """Record a durable lesson so future sessions recall it. ``type``: decision|mistake|howto.
+
+        ``statement`` is the lesson in one crisp sentence; ``detail`` the why/correction/better-way;
+        ``scope`` the repo key it applies to (omit for a global lesson).
+        """
+        return svc.add_learning(
+            type=type,
+            statement=statement,
+            detail=detail,
+            topic=topic,
+            scope=scope,
+            importance=importance,
+        )
+
+    @server.tool()
     def get(chunk_id: int) -> dict | None:
         """Fetch a single chunk's full text + location by ``chunk_id`` (from a prior result)."""
         return svc.get(chunk_id)
