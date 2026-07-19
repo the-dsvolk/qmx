@@ -2,8 +2,10 @@
 
 Strategy: walk the file's top-level nodes. Emit one chunk per top-level definition
 (function/class/…), splitting a definition into its nested members when it is larger than
-``MAX_CHUNK_LINES``. Regions between definitions (imports, constants) become sliding-window chunks
-so nothing is lost. Unsupported languages or parse failures fall back to whole-file windows.
+``MAX_CHUNK_LINES``. When a definition is split, the code *between* its members (the class
+signature, docstring, class-level attributes, blank gaps) is windowed rather than dropped — so no
+source is lost. Regions between definitions (imports, constants) become sliding-window chunks too.
+Unsupported languages or parse failures fall back to whole-file windows.
 """
 
 from __future__ import annotations
@@ -96,7 +98,7 @@ def chunk_code(text: str, language: str | None) -> list[Chunk]:
         if node.type in def_types:
             if node_start > cursor:  # gap before this def -> window it
                 chunks.extend(_window_chunks_from_lines(lines, cursor, node_start))
-            chunks.extend(_chunks_for_definition(node, def_types))
+            chunks.extend(_chunks_for_definition(node, def_types, lines))
             cursor = node.end_point[0] + 1
     if cursor < len(lines):  # trailing region after the last def
         chunks.extend(_window_chunks_from_lines(lines, cursor, len(lines)))
@@ -107,15 +109,52 @@ def chunk_code(text: str, language: str | None) -> list[Chunk]:
     return chunks
 
 
-def _chunks_for_definition(node: Node, def_types: set[str]) -> list[Chunk]:
-    """A definition node -> one chunk, or its nested members if it is too large."""
+def _chunks_for_definition(node: Node, def_types: set[str], lines: list[str]) -> list[Chunk]:
+    """A definition node -> one chunk, or (when too large) its members plus windowed gaps.
+
+    A large definition is split into its shallowest nested members (e.g. a class's methods); the
+    regions *around and between* those members — the signature, docstring, class-level attributes,
+    and blank gaps — are windowed so nothing is lost. Members that are themselves oversized recurse.
+    """
     span = node.end_point[0] - node.start_point[0] + 1
     if span <= MAX_CHUNK_LINES:
         return [_chunk_from_node(node)]
-    members = [c for c in _iter_descendants(node) if c.type in def_types and c is not node]
+    members = _shallow_members(node, def_types)
     if not members:
         return [_chunk_from_node(node)]
-    return [_chunk_from_node(m) for m in members]
+
+    chunks: list[Chunk] = []
+    cursor = node.start_point[0]  # 0-based; covers the def header before the first member
+    for member in members:
+        member_start = member.start_point[0]
+        if member_start > cursor:  # header / attributes / gap before this member -> window it
+            chunks.extend(_window_chunks_from_lines(lines, cursor, member_start))
+        chunks.extend(_chunks_for_definition(member, def_types, lines))
+        cursor = member.end_point[0] + 1
+    end = node.end_point[0] + 1
+    if cursor < end:  # trailing code after the last member
+        chunks.extend(_window_chunks_from_lines(lines, cursor, end))
+    return chunks
+
+
+def _shallow_members(node: Node, def_types: set[str]) -> list[Node]:
+    """The shallowest def-type descendants of ``node`` (not descending into a matched member).
+
+    Yields non-overlapping members in source order (e.g. a class's methods, not their own nested
+    defs), so windowing the gaps between them can't double-cover a region.
+    """
+    members: list[Node] = []
+
+    def walk(n: Node) -> None:
+        for child in n.children:
+            if child.type in def_types:
+                members.append(child)
+            else:
+                walk(child)
+
+    walk(node)
+    members.sort(key=lambda m: m.start_point[0])
+    return members
 
 
 def _chunk_from_node(node: Node) -> Chunk:
@@ -137,12 +176,6 @@ def _symbol_of(node: Node) -> str | None:
         if got is not None:
             return got.text.decode("utf-8", errors="replace")
     return None
-
-
-def _iter_descendants(node: Node):
-    for child in node.children:
-        yield child
-        yield from _iter_descendants(child)
 
 
 def _window_chunks(text: str, start_line: int) -> list[Chunk]:
