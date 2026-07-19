@@ -52,7 +52,7 @@ class Settings:
     db_path: Path = DEFAULT_DB_PATH
 
     # Qwen model tags (as served by Ollama).
-    embed_model: str = "qwen3-embedding"
+    embed_model: str = "qwen3-embedding:0.6b"
     rerank_model: str = "qwen3-reranker"
     # Consolidation/learnings judge — read from here, never hardcoded (see plan/qmx-learnings.md).
     chat_model: str = "qwen3.6:35b-a3b"
