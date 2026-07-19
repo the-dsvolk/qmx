@@ -1,7 +1,8 @@
 """Hybrid search: vector (cosine) + BM25, fused with Reciprocal Rank Fusion.
 
-Ranking is RRF over the vector and BM25 arms. An optional :class:`~qmx.rerank.Reranker` can reorder
-the fused top-k; Phase 3 ships no reranker (RRF-only) — see ``plan/qmx-ml-notes.md`` TD-1.
+Ranking is RRF over the vector and BM25 arms. An optional :class:`~qmx.rerank.Reranker` reorders
+the fused top candidates when ``rerank_url`` is set (a Qwen3-Reranker via llama.cpp on the Spark);
+it is off by default (RRF-only) and fails soft to RRF order — see ``plan/qmx-ml-notes.md`` TD-1.
 """
 
 from __future__ import annotations

@@ -11,9 +11,10 @@
   not the Mac; the Mac dev client points at `spark-0e81.local:11434`. See
   [qmx-deployment.md](./qmx-deployment.md) for the full Mac-dev / Spark-prod topology.
 - **Models — Qwen only** (one Apache-2.0 family):
-  - `qwen3-embedding` — embeddings (vector search)
-  - `qwen3-reranker` — final-stage reranking
-  - a Qwen chat model (e.g. `qwen3` instruct) — chat-turn summarization
+  - `qwen3-embedding` — embeddings (vector search), served by Ollama (`/api/embed`)
+  - `qwen3-reranker` — final-stage reranking, served by **llama.cpp `llama-server --reranking`**
+    (Ollama has no rerank endpoint) — see [qmx-ml-notes.md](./qmx-ml-notes.md) TD-1
+  - a Qwen chat model (e.g. `qwen3.6:35b-a3b`) — chat-turn summarization / consolidation
 - **Interface:** a **resident MCP server** (pay startup once) + a thin CLI for indexing/admin.
 - **Store:** SQLite + `sqlite-vec` (vectors) + FTS5 (BM25). Files on disk are the source of truth;
   the DB is a **rebuildable shadow index**.
@@ -49,8 +50,8 @@ as **display/citation metadata only** (so results show where they came from), no
                          └──────────────────────────────────┬───────────────────────────────────────┘
                                                              │ HTTP :11434
                                         ┌────────────────────▼─────────────────────┐
-                                        │ Ollama:  qwen3-embedding · qwen3-reranker  │
-                                        │       qwen3 (summarize)  (CUDA/GB10, Spark)│
+                                        │ Ollama:  qwen3-embedding · qwen3 (chat)    │
+                                        │ rerank: qwen3-reranker (llama.cpp, Spark)  │
                                         └────────────────────────────────────────────┘
 ```
 
@@ -64,13 +65,13 @@ src/qmx/
     code.py        # tree-sitter AST chunking (py/ts/go/rust + regex fallback)
     doc.py         # markdown header/code-fence aware
     chat.py        # jsonl → clean turns → chunks (drops tool payloads/system-reminders)
-  embed.py         # Ollama /api/embeddings client: batching, retry/backoff, timeouts
+  embed.py         # Ollama /api/embed client: batching, retry/backoff, timeouts
   store.py         # sqlite-vec + FTS5 schema, upsert/delete, hash tables, migrations
   search.py        # vector + BM25 → RRF → optional Qwen3-Reranker
   index.py         # walk sources, hash-diff, incremental reindex, tombstones
   watch.py         # filesystem watcher for code dirs + chat-md dir
   capture.py       # Stop-hook entrypoint (turn → daily md → enqueue)
-  mcp_server.py    # resident MCP server (query/get/status tools)
+  mcp_server.py    # resident MCP server (query/search_code/recall/lessons/add_learning/get/status)
   cli.py           # `qmx index|query|watch|serve|backfill-chats|status`
 tests/
 plan/              # this doc
@@ -197,7 +198,7 @@ Tools appear in Claude Code as `mcp__qmx__*`.
 | **0** | `store.py` schema + migrations; `config.py`; `embed.py` Ollama client | round-trip: embed 3 strings, store, cosine top-k returns them |
 | **1** | Code vertical slice: `chunk/code.py` + `index.py` + `search.py` + `qmx query` | index a local repo; a known function is returned in top-5 for a by-meaning query |
 | **2** | **Robustness core**: incremental reindex, dedup, tombstones, `watch.py` | edit 1 file → only its chunks re-embed; delete file → chunks gone; unchanged run = ~0 embeds |
-| **3** | Resident `mcp_server.py` + Claude Code wiring (rerank **deferred** — see [ml-notes TD-1](./qmx-ml-notes.md)) | MCP `query` callable from Claude Code |
+| **3** | Resident `mcp_server.py` + Claude Code wiring (rerank via llama.cpp `HttpReranker`, off by default — see [ml-notes TD-1](./qmx-ml-notes.md)) | MCP `query` callable from Claude Code |
 | **4** | **Chats**: `chunk/chat.py`, `qmx backfill-chats`, Stop-hook `capture.py` | 86 transcripts searchable; a new turn is queryable within seconds |
 | **5** | Hardening: backend-down, concurrency, huge files, retries + benchmarks | kill Ollama mid-index → resumes cleanly; index+query concurrently; perf numbers recorded |
 

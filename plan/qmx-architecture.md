@@ -23,10 +23,10 @@ flowchart TB
     CH["jsonl → clean turns<br/>(drop tool payloads)"]
   end
 
-  subgraph OLL["Ollama — Qwen only"]
-    E["qwen3-embedding"]
-    R["qwen3-reranker"]
-    SUM["qwen3 (chat)<br/>summarize / extract"]
+  subgraph OLL["Qwen models (Spark GPU)"]
+    E["qwen3-embedding<br/>(Ollama /api/embed)"]
+    R["qwen3-reranker<br/>(llama.cpp --reranking)"]
+    SUM["qwen3 (chat)<br/>(Ollama) summarize / extract"]
   end
 
   subgraph STORE["Local SQLite store"]
@@ -36,7 +36,7 @@ flowchart TB
   end
 
   CON["Consolidation loop<br/>(periodic Qwen pass)"]
-  MCP["qmx MCP server<br/>query · get · status"]
+  MCP["qmx MCP server<br/>query · search_code · recall · lessons · add_learning · get · status"]
   USER["Claude Code / you"]
 
   C --> CC

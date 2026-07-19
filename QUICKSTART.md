@@ -137,9 +137,10 @@ claude mcp get qmx      # → ✔ Connected
 ```
 
 Open a **new** Claude Code session (tools load at startup) and the following appear:
-`mcp__qmx__query`, `mcp__qmx__search_code`, `mcp__qmx__recall`, `mcp__qmx__get`, `mcp__qmx__status`.
-Ask something like *"use qmx to find the rate-limiter"* (`recall` searches past chats specifically;
-`query` searches everything).
+`mcp__qmx__query`, `mcp__qmx__search_code`, `mcp__qmx__recall`, `mcp__qmx__lessons`,
+`mcp__qmx__add_learning`, `mcp__qmx__get`, `mcp__qmx__status` (the last two learnings tools are
+covered in step 8). Ask something like *"use qmx to find the rate-limiter"* (`recall` searches past
+chats specifically; `query` searches everything).
 
 > Tools are **available** to the agent, not auto-run: Claude calls them when relevant or when you
 > ask. Proactive "always consult qmx" wiring (a hook) is future work.

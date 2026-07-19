@@ -1,9 +1,9 @@
-"""Markdown chunking — small, heading-aware. Used for Claude memory files (and docs later).
+"""Markdown chunking — small, heading-aware. Used for repo docs (``kind=doc``) and Claude memory.
 
 Splits on ATX headings (`#`..`######`): each heading + its body becomes one chunk (the heading is
 kept as ``symbol`` and prepended to the text for context); content before the first heading is its
-own chunk. Over-long sections are split by size. No code-fence parsing yet — good enough for the
-short, prose-y ``memory/*.md`` files.
+own chunk. Over-long sections are split by size. No code-fence parsing yet — a `#`-comment inside a
+fenced block is treated as a heading — good enough for the short, prose-y ``*.md`` files indexed.
 """
 
 from __future__ import annotations
