@@ -52,7 +52,14 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-Environment=OLLAMA_HOST=0.0.0.0:11434      # 0.0.0.0 -> reachable from the Mac; localhost still works
+Environment=OLLAMA_HOST=0.0.0.0:11434          # 0.0.0.0 -> reachable from the Mac; localhost still works
+Environment=OLLAMA_KEEP_ALIVE=-1               # never evict models between turns
+Environment=OLLAMA_NUMA=false                  # NUMA-aware loading disabled (GB10 unified memory)
+Environment=OLLAMA_MAX_LOADED_MODELS=1         # single model to reduce contention
+Environment=OLLAMA_FLASH_ATTENTION=1           # enable flash attention for throughput
+Environment=OLLAMA_KV_CACHE_TYPE=q8_0          # higher-precision KV cache (q8_0 vs default f16)
+Environment=OLLAMA_NUM_THREADS=10              # CPU thread count for inference
+
 ExecStart=%h/.local/ollama/bin/ollama serve
 Restart=on-failure
 RestartSec=3
