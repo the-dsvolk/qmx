@@ -111,6 +111,40 @@ def test_identical_code_across_files_dedups(env):
     assert store.index_stats()["live_chunks"] == 1
 
 
+def test_interrupted_write_is_reprocessed_not_silently_skipped(env, monkeypatch):
+    """A failure between the doc upsert and the chunk write must NOT mark the file indexed.
+
+    Regression for the "hash written before chunks -> silent skip forever" bug: the file_hash is
+    the fully-indexed marker and is stamped only after chunks/mentions commit, so an interrupted
+    run leaves a NULL hash and the next run re-indexes rather than skipping an empty document.
+    """
+    root, store, embedder = env
+    (root / "a.py").write_text(TWO_FUNCS)
+
+    calls = {"n": 0}
+    real_reindex = store.reindex_document
+
+    def flaky_reindex(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("crash mid-write")  # after upsert, before chunks commit
+        return real_reindex(*args, **kwargs)
+
+    monkeypatch.setattr(store, "reindex_document", flaky_reindex)
+    with pytest.raises(RuntimeError):
+        index_paths([root], store, embedder)
+
+    # The document exists but was never marked indexed (NULL hash) -> not skippable.
+    assert store.document_hash("code", str((root / "a.py").resolve())) is None
+
+    # A subsequent run actually indexes it (embeds + becomes searchable), not skips it.
+    stats = index_paths([root], store, embedder)
+    assert stats.files_skipped == 0
+    assert stats.files_indexed == 1
+    assert stats.chunks_embedded >= 1
+    assert any("a.py" in (h.hit.path or "") for h in search(store, embedder, "alpha", k=10))
+
+
 def test_rename_reuses_warm_embedding(env):
     root, store, embedder = env
     (root / "e.py").write_text(SHARED)
