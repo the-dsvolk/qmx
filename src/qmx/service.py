@@ -20,7 +20,8 @@ MAX_TEXT_CHARS = 4000  # cap chunk text returned to an agent so results stay com
 
 
 class QmxService:
-    """Read-side operations over the index: ``query``, ``get``, ``status``."""
+    """Operations backing the MCP tools: ``query`` / ``recall`` / ``lessons`` / ``add_learning``
+    (write) / ``get`` / ``status`` over the index."""
 
     def __init__(self, settings: Settings, embedder: Embedder | None = None) -> None:
         self._settings = settings

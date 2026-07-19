@@ -1,8 +1,9 @@
 """Resident MCP server — the primary way Claude Code talks to qmx.
 
-Exposes the read side (``query`` / ``search_code`` / ``get`` / ``status``) as ``mcp__qmx__*`` tools
-over an HTTP endpoint so one server on the Spark serves every Claude Code instance on the LAN
-(``plan/qmx-deployment.md``). The write door (chat capture) arrives in Phase 4.
+Exposes the tools ``query`` / ``search_code`` / ``recall`` / ``lessons`` / ``add_learning`` /
+``get`` / ``status`` as ``mcp__qmx__*`` over an HTTP endpoint, so one server on the Spark serves
+every Claude Code instance on the LAN (``plan/qmx-deployment.md``). Chat capture is a separate
+write path (the ``qmx capture`` Stop hook); ``add_learning`` is the one write tool here.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ def build_server(settings: Settings, service: QmxService | None = None) -> FastM
 
     @server.tool()
     def query(text: str, k: int = 5, kind: str | None = None) -> list[dict]:
-        """Semantic + keyword search over the qmx knowledge base (code today; chats later).
+        """Semantic + keyword search over the qmx knowledge base (code, docs, chats, learnings).
 
         Returns ranked hits with ``path``, ``start_line``/``end_line``, ``symbol``, ``score`` and a
         text snippet. Optional ``kind`` filters to ``code`` | ``doc`` | ``chat`` | ``learning``.
