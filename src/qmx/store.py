@@ -286,6 +286,18 @@ class Store:
         ).fetchone()
         return row[0] if row is not None else None
 
+    def set_document_hash(self, doc_id: int, file_hash: str) -> None:
+        """Record a document's ``file_hash`` — the "fully indexed" marker.
+
+        Written only *after* the document's chunks/mentions are committed, so an interrupted
+        index leaves the row with a NULL hash (re-processed next run) rather than a hash with no
+        chunks (silently skipped forever). See :func:`qmx.index._index_file`.
+        """
+        with self._conn:
+            self._conn.execute(
+                "UPDATE documents SET file_hash=? WHERE doc_id=?", (file_hash, doc_id)
+            )
+
     def document_id(self, kind: str, path: str) -> int | None:
         """The ``doc_id`` for ``(kind, path)``, or ``None`` if not indexed."""
         row = self._conn.execute(

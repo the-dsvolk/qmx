@@ -6,7 +6,10 @@ Phase 2 robustness core (``plan/qmx-plan.md``):
   new/edited chunks (per-chunk hash diff), reusing everything else.
 - **Deletes:** a directory re-scan tombstones documents that vanished from disk.
 - **Crash-safe:** each file embeds *before* any DB write, so a backend failure leaves no
-  half-written document and files done earlier stay committed (resumable).
+  half-written document and files done earlier stay committed (resumable). The document's
+  ``file_hash`` (the "fully indexed" marker) is recorded **only after** its chunks/mentions are
+  committed — so an index interrupted mid-write is re-processed next run, never silently skipped
+  as "already indexed" with no chunks.
 """
 
 from __future__ import annotations
@@ -146,10 +149,13 @@ def _index_file(
     # (the file's file_hash is never recorded -> a later run re-processes it, not silently skipped).
     new_embeddings = embed_missing(store, embedder, chunks)
 
+    # Upsert without the hash, write chunks/mentions, THEN stamp file_hash: the hash is the
+    # "fully indexed" marker, so an interrupted write is re-processed rather than silently skipped.
     doc_id = store.upsert_document(
-        kind=kind, path=path_key, repo=repo, mtime=file_path.stat().st_mtime, file_hash=file_hash
+        kind=kind, path=path_key, repo=repo, mtime=file_path.stat().st_mtime
     )
     result = store.reindex_document(doc_id, chunks, new_embeddings)
+    store.set_document_hash(doc_id, file_hash)
 
     stats.files_indexed += 1
     stats.chunks_added += result.mentions
@@ -223,14 +229,15 @@ def _ingest_transcript(
 
     chunks = chunk_chat(text)
     new_embeddings = embed_missing(store, embedder, chunks)  # embed before any DB write
+    # file_hash last (after chunks land) so an interrupted write is re-processed, not skipped.
     doc_id = store.upsert_document(
         kind="chat",
         path=path_key,
         repo=path.parent.name,
         mtime=path.stat().st_mtime,
-        file_hash=file_hash,
     )
     result = store.reindex_document(doc_id, chunks, new_embeddings)
+    store.set_document_hash(doc_id, file_hash)
 
     stats.files_indexed += 1
     stats.chunks_added += result.mentions
@@ -303,14 +310,15 @@ def _ingest_markdown(
 
     chunks = chunk_markdown(text)
     new_embeddings = embed_missing(store, embedder, chunks)
+    # file_hash last (after chunks land) so an interrupted write is re-processed, not skipped.
     doc_id = store.upsert_document(
         kind="memory",
         path=path_key,
         repo=path.parent.name,
         mtime=path.stat().st_mtime,
-        file_hash=file_hash,
     )
     result = store.reindex_document(doc_id, chunks, new_embeddings)
+    store.set_document_hash(doc_id, file_hash)
 
     stats.files_indexed += 1
     stats.chunks_added += result.mentions
