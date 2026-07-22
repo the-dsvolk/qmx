@@ -209,6 +209,46 @@ Claude Code pipes the turn's transcript path to `qmx capture` on stdin; it incre
 the new turn(s). It's **best-effort and never blocks a turn** (any failure is swallowed). Then
 `mcp__qmx__recall` (or `qmx query --kind chat`) surfaces those conversations.
 
+### Cursor sessions (same store, different transcript schema)
+
+qmx also captures **Cursor** IDE/CLI agent conversations into the *same* KB — Cursor becomes a
+second trigger source, giving unified cross-tool memory. Cursor stores transcripts at
+`~/.cursor/projects/*/agent-transcripts/<uuid>/<uuid>.jsonl` in a JSONL schema that differs from
+Claude's (top-level `role` instead of `type`, no inner `message.role`, `turn_ended` marker lines),
+so the parser is selected with `--source cursor`:
+
+```bash
+qmx backfill-chats --projects ~/.cursor/projects --source cursor   # one-time import
+```
+
+**Capture new turns live** — wire user-level Cursor hooks in `~/.cursor/hooks.json` (paths are
+relative to `~/.cursor/`). Unlike Claude, Cursor's `stop`/`sessionEnd` stdin does **not** reliably
+carry `transcript_path`/`workspace_roots`, but the env vars `CURSOR_TRANSCRIPT_PATH` and
+`CURSOR_PROJECT_DIR` are present — the hook scripts merge those into the payload before piping to
+`qmx`:
+
+```json
+{
+  "version": 1,
+  "hooks": {
+    "stop":       [ { "command": "./hooks/qmx-capture.sh" } ],
+    "sessionEnd": [ { "command": "./hooks/qmx-session-end.sh" } ]
+  }
+}
+```
+
+- `qmx-capture.sh` → `qmx capture --source cursor` (the write door; best-effort, exits 0).
+- `qmx-session-end.sh` → `qmx session-end` → detached `qmx consolidate` (never blocks window close).
+- **No `sessionStart` hook is wired**, so no lessons are injected at Cursor session start (injection
+  is opt-in — it only fires if a `sessionStart` hook calls `qmx session-start`).
+- Scope has no `cwd` in Cursor payloads, so it resolves from `workspace_roots[0]` /
+  `CURSOR_PROJECT_DIR` instead (see `qmx.session._payload_cwd`).
+
+> Wire these **only after** the installed `qmx` binary includes `--source` (`uv tool upgrade qmx`
+> once the Cursor PR is on `main`) — pointing a hook at a stale binary errors on every turn. Cursor
+> loads hooks at startup, so restart Cursor after editing `hooks.json`. Cloud agents don't run
+> `sessionStart`/`sessionEnd`, so live capture is local-IDE/CLI only.
+
 ### Claude memory files
 
 qmx also indexes your **curated Claude memory** (`~/.claude/projects/*/memory/*.md` — the `MEMORY.md`

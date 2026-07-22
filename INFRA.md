@@ -237,6 +237,14 @@ model). Two mechanisms, installed on the Mac — **no daemon, event-driven + a n
    `session-end` spawns `qmx consolidate` **detached** (never blocks session close); `session-start`
    injects scope-matched lessons. Both are best-effort (exit 0). Alongside the existing `Stop →
    qmx capture` hook.
+
+   **Cursor** (`~/.cursor/hooks.json`) is a second trigger source into the same store — `stop →
+   qmx capture --source cursor` and `sessionEnd → qmx session-end` (detached consolidate). Cursor
+   payloads have no `cwd` and don't reliably carry `transcript_path` on stdin, so the hook scripts
+   merge `CURSOR_TRANSCRIPT_PATH` / `CURSOR_PROJECT_DIR` (env) into the payload; scope resolves from
+   `workspace_roots[0]` / `CURSOR_PROJECT_DIR`. **No `sessionStart`** is wired (no injection at
+   Cursor start). See `QUICKSTART.md` §7 for the config; the `--source` flag must exist in the
+   installed binary first. Cloud agents don't fire `sessionStart`/`sessionEnd` (local-only).
 2. **Daily sweep** — a launchd catch-all for sessions the hook missed (crashes, backfilled/old
    transcripts). Runs `qmx consolidate --all` at **03:00 daily**; cheap + idempotent (the
    `consolidated` cursor means it only distils *new* turns). `~/Library/LaunchAgents/com.qmx.consolidate.plist`:
