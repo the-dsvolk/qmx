@@ -12,6 +12,7 @@ import json
 import logging
 from pathlib import Path
 
+from qmx.chunk.chat import ChatSource
 from qmx.config import Settings
 from qmx.embed import OllamaEmbedder
 from qmx.index import index_memory_dir, index_transcript
@@ -20,8 +21,12 @@ from qmx.store import Store
 log = logging.getLogger("qmx.capture")
 
 
-def capture(stdin_text: str, settings: Settings) -> int:
-    """Index the transcript named in the hook payload. Always returns 0 (never blocks a turn)."""
+def capture(stdin_text: str, settings: Settings, source: ChatSource = "claude") -> int:
+    """Index the transcript named in the hook payload. Always returns 0 (never blocks a turn).
+
+    ``source`` selects the transcript schema and is set explicitly by the caller (the Claude Code
+    Stop hook uses the default ``"claude"``; the Cursor ``stop`` hook passes ``"cursor"``).
+    """
     try:
         payload = json.loads(stdin_text) if stdin_text.strip() else {}
         transcript_path = payload.get("transcript_path")
@@ -31,7 +36,7 @@ def capture(stdin_text: str, settings: Settings) -> int:
             Store.open(settings.db_path, settings.embed_dim, settings.embed_model) as store,
             OllamaEmbedder(settings) as embedder,
         ):
-            stats = index_transcript(transcript_path, store, embedder)
+            stats = index_transcript(transcript_path, store, embedder, source=source)
             # Also refresh this project's curated memory (sibling `memory/` of the transcript).
             mem = index_memory_dir(Path(transcript_path).parent / "memory", store, embedder)
         log.info(

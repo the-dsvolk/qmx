@@ -74,7 +74,7 @@ def _cmd_backfill_chats(settings: Settings, args: argparse.Namespace) -> int:
         return 2
     try:
         with _open_store(settings) as store, OllamaEmbedder(settings) as embedder:
-            stats = backfill_chats(projects, store, embedder, force=args.force)
+            stats = backfill_chats(projects, store, embedder, force=args.force, source=args.source)
     except (StoreSchemaMismatch, EmbedBackendError) as exc:
         print(f"backfill-chats failed: {exc}", file=sys.stderr)
         return 1
@@ -90,7 +90,7 @@ def _cmd_backfill_chats(settings: Settings, args: argparse.Namespace) -> int:
 
 def _cmd_capture(settings: Settings, args: argparse.Namespace) -> int:
     # Stop-hook entrypoint: hook JSON arrives on stdin. Best-effort; never fails a turn.
-    return capture(sys.stdin.read(), settings)
+    return capture(sys.stdin.read(), settings, source=args.source)
 
 
 def _cmd_session_start(settings: Settings, args: argparse.Namespace) -> int:
@@ -402,13 +402,27 @@ def build_parser() -> argparse.ArgumentParser:
     p_index.add_argument("paths", nargs="+", help="files or directories to index")
     p_index.add_argument("--force", action="store_true", help="re-index unchanged files too")
 
-    p_bf = sub.add_parser("backfill-chats", help="index existing Claude Code transcripts")
+    p_bf = sub.add_parser("backfill-chats", help="index existing Claude Code / Cursor transcripts")
     p_bf.add_argument(
         "--projects", default=None, help="transcripts dir (default ~/.claude/projects)"
     )
     p_bf.add_argument("--force", action="store_true", help="re-index unchanged transcripts too")
+    p_bf.add_argument(
+        "--source",
+        choices=("claude", "cursor"),
+        default="claude",
+        help="transcript schema to parse (default: claude)",
+    )
 
-    sub.add_parser("capture", help="Stop-hook entrypoint: index the transcript named on stdin")
+    p_cap = sub.add_parser(
+        "capture", help="Stop-hook entrypoint: index the transcript named on stdin"
+    )
+    p_cap.add_argument(
+        "--source",
+        choices=("claude", "cursor"),
+        default="claude",
+        help="transcript schema to parse (default: claude; Cursor stop hook passes cursor)",
+    )
 
     sub.add_parser("session-start", help="SessionStart hook: inject relevant lessons (stdin JSON)")
     sub.add_parser("session-end", help="SessionEnd hook: detached consolidate (stdin JSON)")
