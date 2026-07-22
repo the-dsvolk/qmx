@@ -9,7 +9,7 @@ import pytest
 from qmx.config import Settings
 from qmx.learnings import add_learning
 from qmx.scope import canonical_repo_key, normalize_remote_url
-from qmx.session import build_injection, session_start
+from qmx.session import _payload_cwd, build_injection, session_start
 from qmx.store import Store
 from tests.fakes import FakeEmbedder
 
@@ -45,6 +45,16 @@ def test_canonical_repo_key_uses_remote_not_dirname(tmp_path):
 
 def test_canonical_repo_key_none_outside_git(tmp_path):
     assert canonical_repo_key(tmp_path) is None
+
+
+def test_payload_cwd_prefers_claude_cwd_then_cursor_sources(monkeypatch):
+    # Claude: explicit cwd wins.
+    assert _payload_cwd({"cwd": "/claude/repo"}) == "/claude/repo"
+    # Cursor: no cwd -> first workspace_root.
+    monkeypatch.setenv("CURSOR_PROJECT_DIR", "/env/proj")
+    assert _payload_cwd({"workspace_roots": ["/ws/root", "/ws/other"]}) == "/ws/root"
+    # Cursor: no cwd, no roots -> CURSOR_PROJECT_DIR env.
+    assert _payload_cwd({}) == "/env/proj"
 
 
 @pytest.fixture

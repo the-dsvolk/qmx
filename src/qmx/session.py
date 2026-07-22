@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -29,6 +30,22 @@ log = logging.getLogger("qmx.session")
 
 INJECT_CHAR_BUDGET = 10_000  # SessionStart additionalContext hard cap
 _HEADER = "Relevant lessons from past sessions (qmx). Apply them; supersede if now wrong:"
+
+
+def _payload_cwd(payload: dict) -> str:
+    """Working directory for scope resolution across hook sources.
+
+    Claude Code payloads carry ``cwd``; Cursor payloads do not (they expose ``workspace_roots`` on
+    stdin and ``CURSOR_PROJECT_DIR`` in the env). Prefer ``cwd``, then the first workspace root,
+    then ``CURSOR_PROJECT_DIR``, and finally the process cwd — so both tools scope correctly.
+    """
+    cwd = payload.get("cwd")
+    if cwd:
+        return str(cwd)
+    roots = payload.get("workspace_roots")
+    if isinstance(roots, list) and roots:
+        return str(roots[0])
+    return os.environ.get("CURSOR_PROJECT_DIR") or str(Path.cwd())
 
 
 def build_injection(
@@ -50,7 +67,7 @@ def session_start(stdin_text: str, settings: Settings) -> str:
         # Only inject on a fresh start, not resume/compact (avoid re-injecting mid-session).
         if payload.get("source") not in (None, "startup", "clear"):
             return ""
-        scope = canonical_repo_key(payload.get("cwd") or Path.cwd())
+        scope = canonical_repo_key(_payload_cwd(payload))
         with Store.open(settings.db_path, settings.embed_dim, settings.embed_model) as store:
             context = build_injection(store, scope)
         if not context:
@@ -72,10 +89,10 @@ def session_end(stdin_text: str, settings: Settings) -> bool:
     """Spawn a detached ``qmx consolidate`` for the ending session. Returns whether it launched."""
     try:
         payload = json.loads(stdin_text) if stdin_text.strip() else {}
-        transcript = payload.get("transcript_path")
+        transcript = payload.get("transcript_path") or os.environ.get("CURSOR_TRANSCRIPT_PATH")
         if not transcript:
             return False
-        scope = canonical_repo_key(payload.get("cwd") or Path.cwd())
+        scope = canonical_repo_key(_payload_cwd(payload))
         cmd = [sys.executable, "-m", "qmx.cli", "consolidate", "--session", transcript]
         if scope:
             cmd += ["--scope", scope]
