@@ -21,7 +21,7 @@ from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from qmx.chunk.chat import chunk_chat
+from qmx.chunk.chat import ChatSource, chunk_chat
 from qmx.chunk.code import chunk_code, language_for_path
 from qmx.chunk.doc import chunk_markdown
 from qmx.embed import Embedder
@@ -178,16 +178,22 @@ def _prune_deleted(root: Path, seen: set[str], store: Store, stats: IndexStats) 
 
 
 def index_transcript(
-    path: Path, store: Store, embedder: Embedder, *, force: bool = False
+    path: Path,
+    store: Store,
+    embedder: Embedder,
+    *,
+    force: bool = False,
+    source: ChatSource = "claude",
 ) -> IndexStats:
-    """Index one Claude Code JSONL transcript as ``kind='chat'`` (used by backfill + capture).
+    """Index one JSONL transcript as ``kind='chat'`` (used by backfill + capture).
 
-    Cheap on re-runs: the whole transcript is re-chunked, but the per-chunk dedup means only *new*
-    turns embed — so the Stop hook re-indexing a growing file only pays for the latest turn(s).
+    ``source`` selects the transcript schema (``"claude"`` or ``"cursor"``). Cheap on re-runs: the
+    whole transcript is re-chunked, but the per-chunk dedup means only *new* turns embed — so the
+    Stop hook re-indexing a growing file only pays for the latest turn(s).
     """
     stats = IndexStats()
     stats.files_scanned += 1
-    _ingest_transcript(Path(path), store, embedder, force, stats)
+    _ingest_transcript(Path(path), store, embedder, force, stats, source)
     return stats
 
 
@@ -197,12 +203,18 @@ _CHAT_SKIP_DIRS = frozenset({"subagents", "workflows"})
 
 
 def backfill_chats(
-    projects_dir: Path, store: Store, embedder: Embedder, *, force: bool = False
+    projects_dir: Path,
+    store: Store,
+    embedder: Embedder,
+    *,
+    force: bool = False,
+    source: ChatSource = "claude",
 ) -> IndexStats:
     """Index the main session transcripts under ``projects_dir`` (e.g. ``~/.claude/projects``).
 
-    Only top-level ``<project>/<session>.jsonl`` files — subagent/workflow sub-transcripts (under
-    ``subagents/`` or ``workflows/``) are skipped as internal machinery.
+    ``source`` selects the transcript schema (``"claude"`` or ``"cursor"``). Only top-level
+    ``<project>/<session>.jsonl`` files — subagent/workflow sub-transcripts (under ``subagents/`` or
+    ``workflows/``) are skipped as internal machinery.
     """
     stats = IndexStats()
     for jsonl in sorted(Path(projects_dir).rglob("*.jsonl")):
@@ -210,7 +222,7 @@ def backfill_chats(
             continue
         stats.files_scanned += 1
         try:
-            _ingest_transcript(jsonl, store, embedder, force, stats)
+            _ingest_transcript(jsonl, store, embedder, force, stats, source)
         except OSError as exc:
             stats.errors.append(f"{jsonl}: {exc}")
             log.warning("skip %s: %s", jsonl, exc)
@@ -218,7 +230,12 @@ def backfill_chats(
 
 
 def _ingest_transcript(
-    path: Path, store: Store, embedder: Embedder, force: bool, stats: IndexStats
+    path: Path,
+    store: Store,
+    embedder: Embedder,
+    force: bool,
+    stats: IndexStats,
+    source: ChatSource = "claude",
 ) -> None:
     text = path.read_text(encoding="utf-8", errors="replace")
     path_key = str(path.resolve())
@@ -227,7 +244,7 @@ def _ingest_transcript(
         stats.files_skipped += 1
         return
 
-    chunks = chunk_chat(text)
+    chunks = chunk_chat(text, source)
     new_embeddings = embed_missing(store, embedder, chunks)  # embed before any DB write
     # file_hash last (after chunks land) so an interrupted write is re-processed, not skipped.
     doc_id = store.upsert_document(

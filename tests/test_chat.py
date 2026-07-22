@@ -53,6 +53,63 @@ def test_chunk_chat_keeps_only_clean_turns():
     assert all(c.start_line is not None for c in chunks)
 
 
+# Cursor schema: top-level ``role`` (not ``type``), ``message`` has no inner role, marker lines are
+# ``{"type": "turn_ended", ...}``, and no tool_result/thinking blocks are emitted. Mirrors the real
+# ~/.cursor/projects/*/agent-transcripts/<uuid>/<uuid>.jsonl format verified during the port.
+CURSOR_TRANSCRIPT = "\n".join(
+    [
+        _line(role="user", message={"content": [
+            {"type": "text", "text": "how do I retry a failed network request"},
+        ]}),
+        _line(role="assistant", message={"content": [
+            {"type": "text", "text": "Use exponential backoff between retries."},
+            {"type": "tool_use", "name": "Bash", "input": {"command": "echo secret"}},
+        ]}),
+        _line(type="turn_ended", status="success"),  # marker line (no role) -> skipped
+        _line(role="assistant", message={"content": [
+            {"type": "tool_use", "name": "Glob", "input": {"glob_pattern": "*.py"}},
+        ]}),  # only tool_use -> no text -> dropped
+        _line(role="user", message={"content": [
+            {"type": "text",
+             "text": "<system-reminder>ignore me</system-reminder>what about timeouts"},
+        ]}),
+    ]
+)  # fmt: skip
+
+
+def test_chunk_chat_cursor_source_keeps_only_clean_turns():
+    chunks = chunk_chat(CURSOR_TRANSCRIPT, source="cursor")
+    texts = [c.text for c in chunks]
+    roles = [c.symbol for c in chunks]
+    assert roles == ["user", "assistant", "user"]
+    assert texts[0] == "how do I retry a failed network request"
+    assert texts[1] == "Use exponential backoff between retries."
+    assert texts[2] == "what about timeouts"  # system-reminder stripped
+    joined = "\n".join(texts)
+    for noise in ["echo secret", "turn_ended", "glob_pattern", "ignore me"]:
+        assert noise not in joined
+    assert all(c.start_line is not None for c in chunks)
+
+
+def test_claude_and_cursor_sources_do_not_cross_parse():
+    # Claude parser sees no top-level ``type=user/assistant`` in a Cursor transcript -> nothing.
+    assert chunk_chat(CURSOR_TRANSCRIPT, source="claude") == []
+    # Cursor parser sees no top-level ``role`` in a Claude transcript -> nothing.
+    assert chunk_chat(TRANSCRIPT, source="cursor") == []
+
+
+def test_index_transcript_cursor_source(store):
+    s, embedder, tmp_path = store
+    tp = tmp_path / "cursor-session.jsonl"
+    tp.write_text(CURSOR_TRANSCRIPT)
+    stats = index_transcript(tp, s, embedder, source="cursor")
+    assert stats.files_indexed == 1
+    assert stats.chunks_embedded == 3  # 3 clean turns
+    [qvec] = embedder.embed(["retry with backoff"])
+    hits = s.search_vec(qvec, k=5, kind="chat")
+    assert hits and any("exponential backoff" in h.text for h in hits)
+
+
 def test_chunk_chat_splits_long_turns():
     big = _line(type="user", message={"role": "user", "content": "word " * 800})  # ~4000 chars
     chunks = chunk_chat(big)
