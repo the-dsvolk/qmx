@@ -18,7 +18,14 @@ from qmx.config import Settings
 from qmx.consolidate import consolidate_session
 from qmx.embed import EmbedBackendError, OllamaEmbedder
 from qmx.index import backfill_chats, index_memory, index_paths, index_transcript
-from qmx.learnings import add_learning, lessons
+from qmx.learnings import (
+    add_learning,
+    deprecate_learning,
+    learning_to_dict,
+    lessons,
+    restore_learning,
+    update_learning,
+)
 from qmx.promote import PromotionError, promotable, promote
 from qmx.rerank import make_reranker
 from qmx.search import search
@@ -281,11 +288,78 @@ def _cmd_add_learning(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_update_learning(settings: Settings, args: argparse.Namespace) -> int:
+    """Fix a lesson in place. ``--clear-*``/``--global`` NULL a field; omitted fields are kept."""
+    patch: dict = {}
+    for field in ("type", "topic", "scope", "statement", "detail", "importance"):
+        value = getattr(args, field)
+        if value is not None:
+            patch[field] = value
+    if args.clear_detail:
+        patch["detail"] = None
+    if args.clear_topic:
+        patch["topic"] = None
+    if args.make_global:
+        patch["scope"] = None
+    if not patch:
+        print("update-learning: nothing to change (pass at least one field)", file=sys.stderr)
+        return 2
+    try:
+        with _open_store(settings) as store, OllamaEmbedder(settings) as embedder:
+            learning = update_learning(store, embedder, args.id, **patch)
+    except (StoreSchemaMismatch, EmbedBackendError, ValueError) as exc:
+        print(f"update-learning failed: {exc}", file=sys.stderr)
+        return 1
+    if learning is None:
+        print(f"update-learning: no learning #{args.id}", file=sys.stderr)
+        return 1
+    print(f"updated learning #{learning.learning_id}: {', '.join(sorted(patch))}")
+    print(f"  [{learning.type}/{learning.scope or 'global'}] imp={learning.importance:.2f} "
+          f"{learning.statement}")
+    return 0
+
+
+def _cmd_deprecate_learning(settings: Settings, args: argparse.Namespace) -> int:
+    """Soft-retire a lesson (optionally naming its replacement); keeps the row for audit."""
+    try:
+        with _open_store(settings) as store:
+            learning = deprecate_learning(
+                store, args.id, reason=args.reason, superseded_by=args.superseded_by
+            )
+    except (StoreSchemaMismatch, ValueError) as exc:
+        print(f"deprecate-learning failed: {exc}", file=sys.stderr)
+        return 1
+    if learning is None:
+        print(f"deprecate-learning: no learning #{args.id}", file=sys.stderr)
+        return 1
+    tail = f" (superseded by #{learning.superseded_by})" if learning.superseded_by else ""
+    print(f"deprecated learning #{learning.learning_id}{tail}: {learning.statement}")
+    if learning.promoted_to:
+        print(f"  note: already promoted to {learning.promoted_to} — edit that file too")
+    return 0
+
+
+def _cmd_restore_learning(settings: Settings, args: argparse.Namespace) -> int:
+    try:
+        with _open_store(settings) as store:
+            learning = restore_learning(store, args.id)
+    except StoreSchemaMismatch as exc:
+        print(f"restore-learning failed: {exc}", file=sys.stderr)
+        return 1
+    if learning is None:
+        print(f"restore-learning: no learning #{args.id}", file=sys.stderr)
+        return 1
+    print(f"restored learning #{learning.learning_id}: {learning.statement}")
+    return 0
+
+
 def _cmd_lessons(settings: Settings, args: argparse.Namespace) -> int:
     if args.review:
         return _cmd_lessons_review(settings, args)
+    if args.deprecated:
+        return _cmd_lessons_deprecated(settings, args)
     if not args.query:
-        print("lessons: pass a query, or --review", file=sys.stderr)
+        print("lessons: pass a query, or --review / --deprecated", file=sys.stderr)
         return 2
     reranker = make_reranker(settings)
     try:
@@ -297,6 +371,7 @@ def _cmd_lessons(settings: Settings, args: argparse.Namespace) -> int:
                 k=args.k,
                 type=args.type,
                 scope=args.scope,
+                include_retired=args.include_retired,
                 reranker=reranker,
             )
     except (StoreSchemaMismatch, EmbedBackendError) as exc:
@@ -310,12 +385,49 @@ def _cmd_lessons(settings: Settings, args: argparse.Namespace) -> int:
         return 0
     for i, le in enumerate(results, 1):
         scope = le["scope"] or "global"
+        retired = " RETIRED" if le.get("deprecated_at") else ""
         print(f"{i:>2}. [{le['score']:.4f}] #{le['learning_id']} ({le['type']}/{scope}) "
-              f"imp={le['importance']}")
+              f"imp={le['importance']}{retired}")
         print(f"    {le['statement']}")
         if le["detail"]:
             print(f"      ↳ {le['detail']}")
+        if retired:
+            print(f"      ✗ {_retired_note(le)}")
     return 0
+
+
+def _cmd_lessons_deprecated(settings: Settings, args: argparse.Namespace) -> int:
+    """List soft-retired lessons with their reason + replacement breadcrumb."""
+    try:
+        with _open_store(settings) as store:
+            retired = store.list_learnings(
+                scope=args.scope, include_global=True, deprecated_only=True, limit=args.k
+            )
+    except StoreSchemaMismatch as exc:
+        print(f"lessons --deprecated failed: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps([learning_to_dict(le) for le in retired], indent=2))
+        return 0
+    if not retired:
+        print("(no deprecated lessons)")
+        return 0
+    print(f"{len(retired)} deprecated lesson(s) — `qmx restore-learning <id>` to revive:")
+    for le in retired:
+        print(f"  #{le.learning_id} [{le.type}/{le.scope or 'global'}] {le.statement}")
+        print(f"      ✗ {_retired_note(learning_to_dict(le))}")
+    return 0
+
+
+def _retired_note(le: dict) -> str:
+    """``deprecated <when>: <reason> -> superseded by #N`` for a retired lesson dict."""
+    parts = [f"deprecated {le.get('deprecated_at') or '?'}"]
+    if le.get("deprecated_reason"):
+        parts.append(str(le["deprecated_reason"]))
+    note = ": ".join(parts)
+    if le.get("superseded_by"):
+        note += f" → superseded by #{le['superseded_by']}"
+    return note
 
 
 def _cmd_lessons_review(settings: Settings, args: argparse.Namespace) -> int:
@@ -450,6 +562,34 @@ def build_parser() -> argparse.ArgumentParser:
     p_add.add_argument("--scope", default=None, help="repo key it applies to (omit = global)")
     p_add.add_argument("--importance", type=float, default=0.5, help="0..1 (default 0.5)")
 
+    p_upd = sub.add_parser("update-learning", help="fix an existing lesson in place")
+    p_upd.add_argument("id", type=int, help="learning id")
+    p_upd.add_argument("--statement", default=None, help="replacement statement")
+    p_upd.add_argument("--detail", default=None, help="replacement detail")
+    p_upd.add_argument("--topic", default=None, help="replacement topic slug")
+    p_upd.add_argument(
+        "--type", choices=["decision", "mistake", "howto"], default=None, help="fix the type"
+    )
+    p_upd.add_argument("--scope", default=None, help="re-scope to this repo key")
+    p_upd.add_argument(
+        "--importance", type=float, default=None, help="0..1 — re-weight (no re-embed needed)"
+    )
+    p_upd.add_argument("--clear-detail", action="store_true", help="drop the detail")
+    p_upd.add_argument("--clear-topic", action="store_true", help="drop the topic")
+    p_upd.add_argument(
+        "--global", dest="make_global", action="store_true", help="clear scope (make it global)"
+    )
+
+    p_dep = sub.add_parser("deprecate-learning", help="soft-retire a lesson (reversible)")
+    p_dep.add_argument("id", type=int, help="learning id to retire")
+    p_dep.add_argument("--reason", default=None, help="why it is being retired")
+    p_dep.add_argument(
+        "--superseded-by", type=int, default=None, help="id of the lesson replacing it (optional)"
+    )
+
+    p_res = sub.add_parser("restore-learning", help="un-retire a lesson deprecated by mistake")
+    p_res.add_argument("id", type=int, help="learning id to revive")
+
     p_con = sub.add_parser("consolidate", help="distil chat turns into learnings (Qwen)")
     p_con.add_argument("--session", default=None, help="a transcript .jsonl to consolidate")
     p_con.add_argument("--all", action="store_true", help="consolidate every indexed chat doc")
@@ -465,6 +605,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_les.add_argument("--json", action="store_true", help="emit JSON instead of text")
     p_les.add_argument(
         "--review", action="store_true", help="list promotion-eligible lessons instead"
+    )
+    p_les.add_argument(
+        "--include-retired", action="store_true", help="also match deprecated/superseded lessons"
+    )
+    p_les.add_argument(
+        "--deprecated", action="store_true", help="list soft-retired lessons + why, instead"
     )
     p_les.add_argument("--min-importance", type=float, default=0.6, help="review gate (def 0.6)")
     p_les.add_argument("--min-reuse", type=int, default=1, help="review gate (default 1)")
@@ -505,6 +651,9 @@ _COMMANDS = {
     "refresh": _cmd_refresh,
     "query": _cmd_query,
     "add-learning": _cmd_add_learning,
+    "update-learning": _cmd_update_learning,
+    "deprecate-learning": _cmd_deprecate_learning,
+    "restore-learning": _cmd_restore_learning,
     "lessons": _cmd_lessons,
     "promote": _cmd_promote,
     "consolidate": _cmd_consolidate,

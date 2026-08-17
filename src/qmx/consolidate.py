@@ -124,13 +124,14 @@ def consolidate_candidate(
     target_id = decision.get("target_id")
 
     if action == "update" and _valid_target(target_id, matches):
-        store.update_learning(
-            target_id,
-            statement=statement,
-            detail=detail,
-            importance=importance,
-            source_anchors=json.dumps(source_anchors) if source_anchors else None,
-        )
+        # Only pass what the merge actually produced: in `update_learning` a ``None`` *clears* the
+        # column, so an absent detail/anchors must be omitted rather than sent as None.
+        patch: dict = {"statement": statement, "importance": importance}
+        if detail is not None:
+            patch["detail"] = detail
+        if source_anchors:
+            patch["source_anchors"] = json.dumps(source_anchors)
+        store.update_learning(target_id, **patch)
         reembed_learning(store, embedder, target_id)
         result.updated += 1
         result.learning_ids.append(target_id)

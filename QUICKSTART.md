@@ -138,8 +138,9 @@ claude mcp get qmx      # → ✔ Connected
 
 Open a **new** Claude Code session (tools load at startup) and the following appear:
 `mcp__qmx__query`, `mcp__qmx__search_code`, `mcp__qmx__recall`, `mcp__qmx__lessons`,
-`mcp__qmx__add_learning`, `mcp__qmx__get`, `mcp__qmx__status` (the last two learnings tools are
-covered in step 8). Ask something like *"use qmx to find the rate-limiter"* (`recall` searches past
+`mcp__qmx__add_learning`, `mcp__qmx__update_learning`, `mcp__qmx__deprecate_learning`,
+`mcp__qmx__restore_learning`, `mcp__qmx__get`, `mcp__qmx__status` (the learnings tools are covered in
+step 8). Ask something like *"use qmx to find the rate-limiter"* (`recall` searches past
 chats specifically; `query` searches everything).
 
 > Tools are **available** to the agent, not auto-run: Claude calls them when relevant or when you
@@ -298,7 +299,25 @@ qmx lessons --review                     # list promotion-eligible lessons
 qmx promote <id>                         # graduate one into per-repo curated memory
 ```
 
-Lessons are also exposed to Claude Code as `mcp__qmx__lessons` / `mcp__qmx__add_learning`.
+When a lesson turns out to be **wrong**, fix or retire it instead of letting it keep firing:
+
+```bash
+qmx update-learning 42 --importance 0.1   # re-weight in place (no re-embed; works backend-down)
+qmx update-learning 42 --statement "…"    # fix the wording / --detail / --topic / --type / --scope
+qmx deprecate-learning 42 --reason "renegotiated rate" --superseded-by 57   # soft-retire
+qmx lessons --deprecated                  # what's retired, why, what replaced it
+qmx lessons "h100 price" --include-retired # semantic recall that includes retired lessons
+qmx restore-learning 42                   # undo the retirement
+```
+
+`--superseded-by` is optional: a lesson can be retired as simply wrong with nothing replacing it.
+Retired lessons stop firing on every path (`lessons`, `query --kind learning`, session-start
+injection) but are never destroyed, so `restore-learning` costs nothing.
+
+Lessons are also exposed to Claude Code as `mcp__qmx__lessons` / `mcp__qmx__add_learning` /
+`mcp__qmx__update_learning` / `mcp__qmx__deprecate_learning` / `mcp__qmx__restore_learning` — so the
+agent can correct its own memory mid-session. Hard delete is CLI-only by design (see
+[`plan/qmx-learnings.md`](./plan/qmx-learnings.md)).
 
 **C. Run it automatically** — add Claude Code hooks so each session consolidates on end and injects
 relevant lessons on start (alongside the `Stop` capture hook). In `~/.claude/settings.json`:

@@ -46,18 +46,21 @@ def search(
     pool: int | None = None,
     reranker: Reranker | None = None,
     rerank_pool: int = 40,
+    include_retired: bool = False,
 ) -> list[RankedHit]:
     """Run vector + BM25 over ``store`` and return the RRF-fused top-``k``.
 
     ``pool`` is how many candidates each arm contributes before fusion (default ``max(4k, 20)``).
     If a ``reranker`` is given, the RRF top ``rerank_pool`` candidates are reranked and trimmed to
     ``k``; otherwise the RRF top-``k`` is returned (see ``plan/qmx-ml-notes.md`` TD-1).
+    ``include_retired`` opts back into superseded/soft-retired lessons, hidden by default in both
+    arms (:meth:`~qmx.store.Store.retired_learning_docs`).
     """
     pool = pool or max(4 * k, 20)
     [query_vec] = embedder.embed([query])
 
-    vec_hits = store.search_vec(query_vec, k=pool, kind=kind)
-    fts_hits = store.search_fts(query, k=pool, kind=kind)
+    vec_hits = store.search_vec(query_vec, k=pool, kind=kind, include_retired=include_retired)
+    fts_hits = store.search_fts(query, k=pool, kind=kind, include_retired=include_retired)
 
     by_id: dict[int, SearchHit] = {h.chunk_id: h for h in vec_hits}
     for h in fts_hits:
