@@ -52,6 +52,10 @@ class FakeChat:
     ``extractions`` is a queue of candidate-lists (one per extract pass; reused when exhausted);
     ``decisions`` a queue of consolidate decisions (default ``new``). The system prompt tells the
     two passes apart (extract prompts contain "distill").
+
+    ``decision_prompts`` records the user prompt of each consolidate call, so a test can assert what
+    the judge was actually *shown* (e.g. that retired lessons reached it) rather than only that a
+    scripted decision was applied.
     """
 
     def __init__(
@@ -59,11 +63,13 @@ class FakeChat:
     ) -> None:
         self._extractions = list(extractions or [])
         self._decisions = list(decisions or [])
+        self.decision_prompts: list[str] = []
 
     def complete_json(self, system: str, user: str, schema: dict | None = None) -> dict:
         if "distill" in system:  # EXTRACT_SYSTEM
             learnings = self._extractions.pop(0) if self._extractions else []
             return {"learnings": learnings}
+        self.decision_prompts.append(user)
         return self._decisions.pop(0) if self._decisions else {"action": "new"}
 
 

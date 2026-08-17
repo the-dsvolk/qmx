@@ -21,15 +21,28 @@ import sqlite3
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import sqlite_vec
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 _IN_BATCH = 500  # max params per IN(...) chunk
 
 
 class StoreSchemaMismatch(RuntimeError):
     """The DB was built with a different embedding model/dim/schema — it must be rebuilt."""
+
+
+class Keep:
+    """Sentinel for patch APIs: leave this column alone (``None`` *clears* a nullable column)."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "KEEP"
+
+
+KEEP: Any = Keep()
 
 
 def hash_text(text: str) -> str:
@@ -67,7 +80,16 @@ class SearchHit:
 
 @dataclass(slots=True)
 class Learning:
-    """One distilled lesson (Capability #3). ``superseded_by``/``promoted_to`` track lifecycle."""
+    """One distilled lesson (Capability #3).
+
+    Three orthogonal lifecycle markers:
+
+    - ``superseded_by`` — the newer lesson that replaced this one (a breadcrumb, always kept).
+    - ``deprecated_at``/``deprecated_reason`` — soft-retired: excluded from retrieval by default,
+      **with or without** a replacement. This is what makes "wrong, and nothing replaces it"
+      expressible; ``superseded_by`` alone cannot say that.
+    - ``promoted_to`` — the curated memory file it graduated to.
+    """
 
     learning_id: int
     type: str
@@ -84,10 +106,17 @@ class Learning:
     created_at: str
     updated_at: str
     doc_id: int | None
+    deprecated_at: str | None = None
+    deprecated_reason: str | None = None
 
     @property
     def is_live(self) -> bool:
-        return self.superseded_by is None
+        """Retrievable by default: neither superseded by a newer lesson nor soft-retired."""
+        return self.superseded_by is None and self.deprecated_at is None
+
+    @property
+    def is_deprecated(self) -> bool:
+        return self.deprecated_at is not None
 
 
 @dataclass(slots=True)
@@ -159,6 +188,14 @@ class Store:
         if version == 3:  # v3 -> v4: add the learnings tier (learnings + consolidated cursor)
             self._create_learnings_schema()
             return 4
+        if version == 4:  # v4 -> v5: soft-retire columns (deprecate without a replacement)
+            self._conn.executescript(
+                """
+                ALTER TABLE learnings ADD COLUMN deprecated_at     TEXT;
+                ALTER TABLE learnings ADD COLUMN deprecated_reason TEXT;
+                """
+            )
+            return 5
         raise StoreSchemaMismatch(f"no migration path from schema v{version}")
 
     def _create_schema(self) -> None:
@@ -212,7 +249,7 @@ class Store:
 
         A learning's ``statement``+``detail`` is *also* embedded as a ``kind='learning'`` document
         (one chunk, ``path='learning:<id>'``) so retrieval reuses the vector+FTS pipeline unchanged;
-        this table holds the structured metadata (type/scope/importance/supersede/promotion).
+        this table holds the structured metadata (type/scope/importance/supersede/deprecate).
         """
         self._conn.executescript(
             """
@@ -231,7 +268,9 @@ class Store:
                 last_fired_at TEXT,
                 promoted_to   TEXT,                  -- curated memory/*.md path it graduated to
                 created_at    TEXT DEFAULT (datetime('now')),
-                updated_at    TEXT DEFAULT (datetime('now'))
+                updated_at    TEXT DEFAULT (datetime('now')),
+                deprecated_at     TEXT,              -- soft-retired: hidden from retrieval
+                deprecated_reason TEXT               -- why (shown when include_deprecated=True)
             );
             CREATE INDEX idx_learnings_scope ON learnings(scope);
             CREATE INDEX idx_learnings_doc ON learnings(doc_id);
@@ -526,13 +565,18 @@ class Store:
         return _rows_to_hits([row], 1, None, distance_key="distance")[0]
 
     def search_vec(
-        self, query_embedding: Sequence[float], k: int = 10, kind: str | None = None
+        self,
+        query_embedding: Sequence[float],
+        k: int = 10,
+        kind: str | None = None,
+        *,
+        include_retired: bool = False,
     ) -> list[SearchHit]:
         """Cosine top-k over live (mentioned) chunks, optionally filtered by ``kind``."""
         if len(query_embedding) != self._embed_dim:
             raise ValueError(f"query dim {len(query_embedding)} != {self._embed_dim}")
         # Over-fetch: the ANN table may still hold tombstoned (orphan) vectors that the mentions
-        # join drops, and a kind filter trims further.
+        # join drops, and a kind/retired filter trims further.
         fetch = max(k * 4, k + 20)
         rows = self._conn.execute(
             f"""
@@ -547,9 +591,17 @@ class Store:
             """,
             (sqlite_vec.serialize_float32(list(query_embedding)), fetch),
         ).fetchall()
+        rows = self._drop_retired(rows, include_retired)
         return _rows_to_hits(rows, k, kind, distance_key="distance")
 
-    def search_fts(self, query: str, k: int = 10, kind: str | None = None) -> list[SearchHit]:
+    def search_fts(
+        self,
+        query: str,
+        k: int = 10,
+        kind: str | None = None,
+        *,
+        include_retired: bool = False,
+    ) -> list[SearchHit]:
         """BM25 top-k over live chunks via FTS5, optionally filtered by ``kind``."""
         match = _fts_match_query(query)
         if match is None:
@@ -569,7 +621,33 @@ class Store:
             """,
             (match, fetch),
         ).fetchall()
+        rows = self._drop_retired(rows, include_retired)
         return _rows_to_hits(rows, k, kind, distance_key="distance")
+
+    def retired_learning_docs(self) -> set[int]:
+        """``doc_id``s of retired lessons — superseded **or** soft-retired (``deprecated_at``).
+
+        The single definition of "hidden from search". Applied inside :meth:`search_vec` /
+        :meth:`search_fts` so a retired lesson is invisible to *every* caller — ``lessons``, raw
+        ``query --kind learning``, and the consolidation judge alike — rather than each read path
+        remembering to filter. Retirement is metadata-only: the chunk, its mention and its embedding
+        are untouched, so ``include_retired=True`` (and restore) costs nothing.
+        """
+        return {
+            r[0]
+            for r in self._conn.execute(
+                "SELECT doc_id FROM learnings WHERE doc_id IS NOT NULL "
+                "AND (deprecated_at IS NOT NULL OR superseded_by IS NOT NULL)"
+            ).fetchall()
+        }
+
+    def _drop_retired(
+        self, rows: Sequence[sqlite3.Row], include_retired: bool
+    ) -> Sequence[sqlite3.Row]:
+        if include_retired or not any(r["kind"] == "learning" for r in rows):
+            return rows
+        retired = self.retired_learning_docs()
+        return [r for r in rows if r["doc_id"] not in retired] if retired else rows
 
     def counts(self) -> dict[str, int]:
         """Base row counts (documents, content chunks, vectors)."""
@@ -649,6 +727,7 @@ class Store:
         scope: str | None = None,
         include_global: bool = False,
         live_only: bool = True,
+        deprecated_only: bool = False,
         exclude_promoted: bool = False,
         min_importance: float | None = None,
         min_reuse: int | None = None,
@@ -657,8 +736,10 @@ class Store:
         """Learnings ordered by importance then recency (the query-free injection ranking).
 
         ``scope`` filters to that repo key; ``include_global`` also pulls ``scope IS NULL`` rows.
-        ``live_only`` excludes superseded lessons; ``exclude_promoted`` drops graduated ones.
-        ``min_importance``/``min_reuse`` gate promotion-eligibility (``qmx lessons --review``).
+        ``live_only`` excludes superseded **and** soft-retired lessons; ``deprecated_only`` inverts
+        that to list just the retired ones (``qmx lessons --deprecated``); ``exclude_promoted``
+        drops graduated ones. ``min_importance``/``min_reuse`` gate promotion-eligibility
+        (``qmx lessons --review``).
         """
         clauses: list[str] = []
         params: list[object] = []
@@ -669,8 +750,10 @@ class Store:
             else:
                 clauses.append("scope = ?")
                 params.append(scope)
-        if live_only:
-            clauses.append("superseded_by IS NULL")
+        if deprecated_only:
+            clauses.append("deprecated_at IS NOT NULL")
+        elif live_only:
+            clauses.append("superseded_by IS NULL AND deprecated_at IS NULL")
         if exclude_promoted:
             clauses.append("promoted_to IS NULL")
         if min_importance is not None:
@@ -699,31 +782,80 @@ class Store:
         self,
         learning_id: int,
         *,
-        statement: str | None = None,
-        detail: str | None = None,
-        importance: float | None = None,
-        source_anchors: str | None = None,
-    ) -> None:
-        """Patch a live learning's content fields (used by consolidate's ``update`` decision)."""
+        type: str = KEEP,
+        topic: str | None = KEEP,
+        scope: str | None = KEEP,
+        statement: str = KEEP,
+        detail: str | None = KEEP,
+        importance: float = KEEP,
+        source_anchors: str | None = KEEP,
+    ) -> bool:
+        """Patch a learning's fields in place; returns whether a row was touched.
+
+        Every field defaults to :data:`KEEP` (leave alone), so passing ``None`` for a nullable
+        column (``topic``/``scope``/``detail``/``source_anchors``) **clears** it — that is how a
+        lesson is re-scoped to global. Callers own validation of ``type``/``importance``
+        (see :func:`qmx.learnings.update_learning`); re-embedding is a separate step.
+        """
         sets: list[str] = []
         params: list[object] = []
         for col, val in (
+            ("type", type),
+            ("topic", topic),
+            ("scope", scope),
             ("statement", statement),
             ("detail", detail),
             ("importance", importance),
             ("source_anchors", source_anchors),
         ):
-            if val is not None:
+            if not isinstance(val, Keep):
                 sets.append(f"{col}=?")
                 params.append(val)
         if not sets:
-            return
+            return False
         sets.append("updated_at=datetime('now')")
         params.append(learning_id)
         with self._conn:
-            self._conn.execute(
+            cur = self._conn.execute(
                 f"UPDATE learnings SET {', '.join(sets)} WHERE learning_id=?", params
             )
+        return cur.rowcount > 0
+
+    def deprecate_learning(
+        self, learning_id: int, *, reason: str | None = None, superseded_by: int | None = None
+    ) -> bool:
+        """Soft-retire a lesson: hidden from retrieval by default, kept with a breadcrumb.
+
+        ``superseded_by`` is optional — a lesson can be retired as simply *wrong* with nothing
+        replacing it, which :meth:`supersede_learning` (which needs a replacement row) cannot
+        express. Passing it both retires this lesson and records the pointer to its replacement.
+        Idempotent: re-deprecating refreshes the reason without resetting ``deprecated_at``.
+        """
+        with self._conn:
+            cur = self._conn.execute(
+                """
+                UPDATE learnings SET
+                    deprecated_at     = COALESCE(deprecated_at, datetime('now')),
+                    deprecated_reason = COALESCE(?, deprecated_reason),
+                    superseded_by     = COALESCE(?, superseded_by),
+                    updated_at        = datetime('now')
+                WHERE learning_id=?
+                """,
+                (reason, superseded_by, learning_id),
+            )
+        return cur.rowcount > 0
+
+    def restore_learning(self, learning_id: int) -> bool:
+        """Undo a deprecation — clears ``deprecated_at``/``deprecated_reason`` *and*
+        ``superseded_by``, so the lesson is fully live again (``is_live``)."""
+        with self._conn:
+            cur = self._conn.execute(
+                "UPDATE learnings SET deprecated_at=NULL, deprecated_reason=NULL, "
+                "superseded_by=NULL, updated_at=datetime('now') WHERE learning_id=?",
+                (learning_id,),
+            )
+        return cur.rowcount > 0
+
 
     def touch_learning(self, learning_id: int) -> None:
         """Record a lesson firing (retrieved/injected): bump ``reuse_count`` + ``last_fired_at``."""
@@ -818,6 +950,8 @@ def _row_to_learning(r: sqlite3.Row) -> Learning:
         created_at=r["created_at"],
         updated_at=r["updated_at"],
         doc_id=r["doc_id"],
+        deprecated_at=r["deprecated_at"],
+        deprecated_reason=r["deprecated_reason"],
     )
 
 

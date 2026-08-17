@@ -4,6 +4,12 @@ This module orchestrates the store + embed layers into the learning lifecycle:
 
 - :func:`add_learning` — insert a lesson and embed its ``statement``+``detail`` as a
   ``kind='learning'`` document (so it rides the existing vector+FTS+rerank retrieval).
+- :func:`update_learning` — fix a lesson **in place** (statement/detail/type/topic/scope/
+  importance), re-embedding only when an embedded field actually changed.
+- :func:`deprecate_learning` / :func:`restore_learning` — soft-retire a lesson (optionally pointing
+  at its replacement) and undo. Retirement is metadata-only and enforced inside the search arms, so
+  a retired lesson vanishes from *every* read path — not just :func:`lessons` — and comes back for
+  free with ``include_retired=True``.
 - :func:`lessons` — the **pull** path: semantic search over ``kind='learning'`` re-ranked by
   ``relevance × importance × recency`` (not relevance alone), returning lessons with citations.
 - :func:`inject_lessons` — the **push** path: query-free, ``scope``-keyed selection ranked by
@@ -23,7 +29,7 @@ from qmx.embed import Embedder
 from qmx.index import reindex
 from qmx.rerank import Reranker
 from qmx.search import search
-from qmx.store import Chunk, Learning, Store
+from qmx.store import KEEP, Chunk, Keep, Learning, Store
 
 LEARNING_TYPES = ("decision", "mistake", "howto")
 _PATH_PREFIX = "learning:"
@@ -92,6 +98,100 @@ def add_learning(
     return learning_id
 
 
+def update_learning(
+    store: Store,
+    embedder: Embedder,
+    learning_id: int,
+    *,
+    type: str = KEEP,
+    topic: str | None = KEEP,
+    scope: str | None = KEEP,
+    statement: str = KEEP,
+    detail: str | None = KEEP,
+    importance: float = KEEP,
+) -> Learning | None:
+    """Fix a lesson in place; returns the updated row (``None`` if ``learning_id`` is unknown).
+
+    Every field defaults to :data:`~qmx.store.KEEP` (leave alone) and ``None`` clears a nullable one
+    (``topic``/``scope``/``detail``), so ``scope=None`` re-scopes a lesson to global.
+
+    Two costs are avoided deliberately:
+
+    - **No embedding call** unless an *embedded* field changed (``type``/``topic``/``statement``/
+      ``detail`` — see :func:`embed_text`). Lowering ``importance``, the most common correction, is
+      therefore a purely local write that works with the model backend down.
+    - ``scope`` also lives on the learning's ``documents.repo`` row (that is what scope-filtered
+      retrieval reads), so it is re-upserted rather than left to drift.
+    """
+    before = store.get_learning(learning_id)
+    if before is None:
+        return None
+    if not isinstance(type, Keep) and type not in LEARNING_TYPES:
+        raise ValueError(f"learning type must be one of {LEARNING_TYPES}, got {type!r}")
+    if not isinstance(statement, Keep) and not (statement or "").strip():
+        raise ValueError("statement cannot be empty")
+    if not isinstance(importance, Keep):
+        importance = _clamp01(importance)
+
+    store.update_learning(
+        learning_id,
+        type=type,
+        topic=topic,
+        scope=scope,
+        statement=statement,
+        detail=detail,
+        importance=importance,
+    )
+    after = store.get_learning(learning_id)
+    if after is None:  # pragma: no cover - the row was just read above
+        return None
+
+    if not isinstance(scope, Keep) and after.scope != before.scope and after.doc_id is not None:
+        store.upsert_document(
+            kind="learning", path=learning_doc_path(learning_id), repo=after.scope or "_global"
+        )
+    if embed_text(after.type, after.statement, after.detail, after.topic) != embed_text(
+        before.type, before.statement, before.detail, before.topic
+    ):
+        reembed_learning(store, embedder, learning_id)
+    return after
+
+
+def deprecate_learning(
+    store: Store,
+    learning_id: int,
+    *,
+    reason: str | None = None,
+    superseded_by: int | None = None,
+) -> Learning | None:
+    """Soft-retire a lesson and hide it from every search path; returns the row (or ``None``).
+
+    Sets ``deprecated_at`` plus an optional ``reason`` and ``superseded_by`` breadcrumb. Hiding is
+    enforced once, inside the search arms (:meth:`~qmx.store.Store.retired_learning_docs`), so a
+    retired lesson also disappears from raw ``query --kind learning`` and from the consolidation
+    judge's candidate pool — not just from :func:`lessons`. Metadata-only: the chunk, mention and
+    embedding are untouched, so this needs no model backend and :func:`restore_learning` is free.
+    """
+    if store.get_learning(learning_id) is None:
+        return None
+    if superseded_by is not None:
+        if superseded_by == learning_id:
+            raise ValueError("a learning cannot supersede itself")
+        if store.get_learning(superseded_by) is None:
+            raise ValueError(f"superseded_by={superseded_by} is not an existing learning")
+    store.deprecate_learning(learning_id, reason=reason, superseded_by=superseded_by)
+    return store.get_learning(learning_id)
+
+
+def restore_learning(store: Store, learning_id: int) -> Learning | None:
+    """Undo a retirement: clear ``deprecated_at``/``deprecated_reason`` **and** ``superseded_by``,
+    making the lesson fully live again. Metadata-only — no re-embedding."""
+    if store.get_learning(learning_id) is None:
+        return None
+    store.restore_learning(learning_id)
+    return store.get_learning(learning_id)
+
+
 def reembed_learning(store: Store, embedder: Embedder, learning_id: int) -> None:
     """Rebuild a learning's embedded chunk from its current row (after an ``update``)."""
     learning = store.get_learning(learning_id)
@@ -116,24 +216,35 @@ def lessons(
     type: str | None = None,
     scope: str | None = None,
     include_global: bool = True,
+    include_retired: bool = False,
     reranker: Reranker | None = None,
 ) -> list[dict]:
     """Pull path: semantic ``kind='learning'`` search re-ranked by relevance×importance×recency.
 
-    Superseded lessons are excluded. ``scope`` (with ``include_global``) filters by repo key;
-    ``type`` filters decision/mistake/howto. Each returned (and fired) lesson is ``touch``-ed so its
-    ``reuse_count`` reflects use (the promotion gate). Fails soft to ``importance×recency`` order if
-    the query yields nothing.
+    Superseded and soft-retired lessons are excluded unless ``include_retired`` is set — the
+    "show me what I retired, with the breadcrumb to its replacement" path, where each result carries
+    ``deprecated_at``/``deprecated_reason``/``superseded_by``. ``scope`` (with ``include_global``)
+    filters by repo key; ``type`` filters decision/mistake/howto. Each returned (and fired) lesson
+    is ``touch``-ed so its ``reuse_count`` reflects use (the promotion gate). Fails soft to
+    ``importance×recency`` order if the query yields nothing.
     """
     pool = max(4 * k, 20)
-    hits = search(store, embedder, query, k=pool, kind="learning", reranker=reranker)
+    hits = search(
+        store,
+        embedder,
+        query,
+        k=pool,
+        kind="learning",
+        reranker=reranker,
+        include_retired=include_retired,
+    )
     relevance = {h.hit.doc_id: h.score for h in hits}
     max_rel = max(relevance.values(), default=0.0) or 1.0
 
     ranked: list[tuple[float, Learning]] = []
     for h in hits:
         learning = store.learning_by_doc_id(h.hit.doc_id)
-        if learning is None or not learning.is_live:
+        if learning is None or not (learning.is_live or include_retired):
             continue
         if type is not None and learning.type != type:
             continue
@@ -149,7 +260,10 @@ def lessons(
     ranked.sort(key=lambda t: t[0], reverse=True)
     top = ranked[:k]
     for _score, learning in top:
-        store.touch_learning(learning.learning_id)
+        # Retired lessons are surfaced for inspection, not use — don't credit them on the
+        # ``reuse_count`` promotion gate.
+        if learning.is_live:
+            store.touch_learning(learning.learning_id)
     return [learning_to_dict(learning, score=score) for score, learning in top]
 
 
@@ -202,6 +316,12 @@ def learning_to_dict(learning: Learning, *, score: float | None = None) -> dict:
     }
     if score is not None:
         out["score"] = round(score, 6)
+    # Only present on retired lessons, so a normal result stays as compact as before.
+    if learning.is_deprecated:
+        out["deprecated_at"] = learning.deprecated_at
+        out["deprecated_reason"] = learning.deprecated_reason
+    if learning.superseded_by is not None:
+        out["superseded_by"] = learning.superseded_by
     return out
 
 

@@ -1,8 +1,10 @@
 # qmx — Learnings & Consolidation (Capability #3) — implementation spec
 
-> **Status: implemented** (Phases A–E). Schema v4 + `qmx.learnings`/`consolidate`/`session`/`promote`,
-> CLI `add-learning`/`lessons`/`consolidate`/`lessons --review`/`promote`, MCP `lessons`/`add_learning`,
-> and SessionStart/SessionEnd hooks. Model is config-driven (`chat_model`, default `qwen3.6:35b-a3b`).
+> **Status: implemented** (Phases A–G). Schema v5 + `qmx.learnings`/`consolidate`/`session`/`promote`,
+> CLI `add-learning`/`update-learning`/`deprecate-learning`/`restore-learning`/`lessons`
+> (`--review`, `--deprecated`, `--include-retired`)/`consolidate`/`promote`, MCP `lessons` +
+> `add_learning`/`update_learning`/`deprecate_learning`/`restore_learning`, and SessionStart/SessionEnd
+> hooks. Model is config-driven (`chat_model`, default `qwen3.6:35b-a3b`).
 
 Turns **raw recall** (`kind=chat` — past turns verbatim) into a **distilled tier** of reusable
 lessons (`kind=learning`): *decisions*, *mistakes+corrections*, and *how-tos*, auto-drafted from
@@ -21,7 +23,7 @@ docstring, the `--kind` help). **No** `learnings` table, consolidation, `lessons
 tools, or chat-model call. `Settings.chat_model = "qwen3"` is defined but **never invoked**. So
 Capability #3 is 0% built; this spec is greenfield on top of the existing store/embed/search/MCP.
 
-## Data model (schema v4)
+## Data model (schema v5)
 
 ```sql
 CREATE TABLE learnings (
@@ -38,7 +40,9 @@ CREATE TABLE learnings (
   last_fired_at TEXT,                 -- when last retrieved/injected (for recency + gate)
   promoted_to   TEXT,                 -- path of the curated memory/*.md it graduated to (NULL = not promoted)
   created_at    TEXT DEFAULT (datetime('now')),
-  updated_at    TEXT DEFAULT (datetime('now'))
+  updated_at    TEXT DEFAULT (datetime('now')),
+  deprecated_at     TEXT,             -- v5: soft-retired — hidden from retrieval, kept for audit
+  deprecated_reason TEXT              -- v5: why it was retired (shown with include_retired)
 );
 -- statement+detail are also embedded into the existing chunk/vec/fts tables as kind="learning"
 -- (one chunk per learning) so retrieval reuses vector + BM25 + rerank unchanged.
@@ -49,9 +53,74 @@ CREATE TABLE consolidated (               -- restart-safe cursor: which turns ar
 );
 ```
 
-Live learnings = `superseded_by IS NULL`. Superseded ones are kept (audit trail) but excluded from
-retrieval. The `consolidated` table (a `processed`-style cursor) makes the extraction pass idempotent
-and resumable — re-running never re-distills the same turns.
+Live learnings = `superseded_by IS NULL AND deprecated_at IS NULL`. Retired ones are kept (audit
+trail) but excluded from retrieval. The `consolidated` table (a `processed`-style cursor) makes the
+extraction pass idempotent and resumable — re-running never re-distills the same turns.
+
+### Lifecycle ops (v5)
+
+The three markers are **orthogonal**, which is the point:
+
+| Marker | Meaning | Set by |
+|---|---|---|
+| `superseded_by` | a newer lesson replaced this one — a breadcrumb, always kept | consolidate's `supersede`, or `deprecate --superseded-by` |
+| `deprecated_at` / `deprecated_reason` | soft-retired: stops firing, **with or without** a replacement | `deprecate_learning` |
+| `promoted_to` | graduated to a curated memory file | `promote` |
+
+Before v5, retirement *required* a replacement row (`superseded_by` was the only "not live" signal),
+so "this lesson is simply wrong and nothing replaces it" was inexpressible — the only options were to
+leave it firing or to bury it under a synthetic replacement. `deprecated_at` fixes that; passing
+`superseded_by` as well covers the corrected-value case (a stale price retired *and* pointed at its
+replacement) in one call.
+
+**Ops** (`qmx.learnings`, exposed over MCP and the CLI):
+
+- `update_learning(id, …)` — fix a lesson **in place**: statement / detail / type / topic / scope /
+  importance. Every field defaults to a `KEEP` sentinel and `None` *clears* a nullable column, so
+  `scope=None` re-scopes to global. Two deliberate cost properties: the embedding backend is called
+  **only** when an embedded field (type/topic/statement/detail) actually changed — so re-weighting
+  works with the Spark down — and `scope` is mirrored onto the learning's `documents.repo` row rather
+  than left to drift out of sync with scope-filtered retrieval.
+- `deprecate_learning(id, reason=…, superseded_by=…)` — soft-retire; reversible.
+- `restore_learning(id)` — clears the retire **and** supersede markers, making the lesson live again.
+
+**Where hiding is enforced.** Retirement filters inside the two search arms
+(`Store.search_vec` / `search_fts`, via `retired_learning_docs()`), not in `lessons()`. Filtering in
+`lessons()` alone left a leak: raw `query --kind learning` bypasses it and still returned superseded
+lessons. One chokepoint means retired lessons vanish from `lessons`, from `query`, and from the
+consolidation judge's candidate pool alike; `include_retired=True` opts back in. Retirement is
+metadata-only — the chunk, its mention and its embedding are untouched — so restore costs no
+embedding call.
+
+**Closing the loop in consolidation.** Hiding retired lessons from search also hides them from the
+judge's own candidate lookup, which would make it re-learn a retired lesson as a fresh `new` row one
+session later — retirement silently undone. So `_nearest_learnings` matches with
+`include_retired=True` and budgets the two kinds separately (up to `_MATCH_POOL` live +
+`_MATCH_RETIRED` retired), so context never displaces a live match the judge might have merged into,
+and retired neighbours are rendered `[RETIRED: <reason>]` in the prompt. The judge then has five
+actions:
+
+| Action | Effect |
+|---|---|
+| `new` | insert the candidate |
+| `update` | patch the target in place + re-embed |
+| `supersede` | insert the candidate, retire the target pointing at it |
+| `deprecate` | retire the target with a `reason`; **nothing is inserted** (no replacement exists) |
+| `drop` | discard the candidate — it only re-learns a `[RETIRED]` lesson |
+
+A retired lesson is never a valid `update`/`supersede`/`deprecate` target (`_valid_target` requires
+liveness), so a stray decision cannot undo a retirement; an invalid target falls through to the
+insert path, which risks a duplicate rather than losing a candidate. `deprecate` and `drop` are
+counted on `ConsolidateResult` and reported by `qmx consolidate` — a candidate that disappears
+without a trace is indistinguishable from one that was never extracted, so neither is silent.
+
+**Hard delete is deliberately absent from the MCP surface.** Its two legitimate uses — flat-out wrong
+with no historical value, and confidentiality (a lesson that captured e.g. a negotiated rate) — are
+human calls, so it is planned as a CLI-only verb. Two things it must handle when built: purge the
+chunk/FTS/vector rows (otherwise the text stays full-text searchable, which defeats the
+confidentiality case — safe to hard-delete because `add_learning`'s trailing `[#id]` marker keeps each
+learning's chunk unshared), and refuse-or-warn on a non-NULL `promoted_to`, since the text also lives
+in a curated `.md` file on disk that a DB delete does not touch.
 
 ## Pipeline
 
@@ -62,7 +131,7 @@ flowchart LR
   end
   subgraph LLM["Qwen chat model (see Model decision)"]
     EX["extract<br/>turns → candidate lessons (JSON)"]
-    CO["consolidate<br/>new vs update vs supersede"]
+    CO["consolidate<br/>new · update · supersede<br/>deprecate · drop"]
   end
   subgraph OUT["tier 2 — learnings"]
     L[("learnings table<br/>+ kind=learning vectors")]
@@ -293,6 +362,8 @@ path, not a launch dependency.
 | **C** | dedup + **supersede** (vector-match + Qwen judge) | a corrected lesson supersedes the stale one; superseded excluded from `lessons` |
 | **D** | `SessionEnd` (consolidate) + `SessionStart` (inject) hooks | new lesson appears after a session; next session is injected with relevant lessons |
 | **E** | **Promotion + per-repo isolation:** repo-keyed store `~/.qmx/memory/<repo-key>/` (+ `_global/`); `qmx lessons --review` + `qmx promote <id>` (type-map, dedup vs this repo's `kind=doc` memory, write frontmatter + per-repo MEMORY.md pointer, set `promoted_to`) | approve an eligible lesson in `xtorch` → a valid md lands in `Cruise__xtorch/` (updates the matching file, not a dup) with its pointer in that dir's MEMORY.md; promoting from a worktree lands in the same repo dir; a `cpe-intelligence` session is never injected with xtorch's files; the promoted learning stops being injected |
+| **F** | **Lifecycle ops (schema v5):** in-place `update_learning`; `deprecate_learning` (+ optional `superseded_by`) / `restore_learning`; retired-hiding enforced in the search arms; `include_retired` opt-in; MCP + CLI surfaces | a wrong lesson is corrected in place (same id, no duplicate); an importance-only edit makes **zero** embedding calls; a retired lesson stops appearing in `lessons` **and** `query --kind learning` and in injection, still lists under `lessons --deprecated` with its reason + replacement, and `restore-learning` brings it back with no re-embed; a v4 DB migrates in place |
+| **G** | **Retirement in the pipeline:** judge actions `deprecate` + `drop`; `_nearest_learnings` matches with `include_retired=True` (live/retired budgeted separately, retired rendered `[RETIRED: reason]`); `_valid_target` requires liveness; `deprecated`/`dropped` counted and reported | the judge retires a wrong lesson with no replacement stored (row count unchanged, reason recorded); a candidate re-learning a retired lesson is dropped instead of re-added as `new`, and the retired lesson provably reaches the prompt; an `update`/`supersede` aimed at a retired target leaves it untouched and inserts instead of losing the candidate |
 
 ## Open questions
 
@@ -305,4 +376,10 @@ path, not a launch dependency.
    TBD; promotion itself is **human-gated** (decided). Should very-high-confidence lessons ever
    auto-promote, or always pass through `--review`? (v1: always review.)
 5. **Trust** — a learning can encode a wrong conclusion; supersede + importance + the human review
-   gate mitigate. Should low-confidence lessons be quarantined until reused?
+   gate mitigate, and phase F adds correction in place + soft-retire (so a wrong lesson can be fixed
+   or silenced, not merely out-weighted). Should low-confidence lessons be quarantined until reused?
+6. **Re-learning a retired lesson** — `drop` keeps the retirement, deliberately trusting the human's
+   retirement over the model's re-learning; the count surfaces in `qmx consolidate` output. If a
+   lesson keeps getting re-learned, that is a signal the retirement was wrong — should the judge be
+   allowed to `restore` it (currently a human/agent-only op), or should repeated drops just be
+   reported for review? (v1: report, never auto-restore.)
