@@ -1,6 +1,6 @@
 # qmx — Learnings & Consolidation (Capability #3) — implementation spec
 
-> **Status: implemented** (Phases A–F). Schema v5 + `qmx.learnings`/`consolidate`/`session`/`promote`,
+> **Status: implemented** (Phases A–G). Schema v5 + `qmx.learnings`/`consolidate`/`session`/`promote`,
 > CLI `add-learning`/`update-learning`/`deprecate-learning`/`restore-learning`/`lessons`
 > (`--review`, `--deprecated`, `--include-retired`)/`consolidate`/`promote`, MCP `lessons` +
 > `add_learning`/`update_learning`/`deprecate_learning`/`restore_learning`, and SessionStart/SessionEnd
@@ -92,10 +92,27 @@ consolidation judge's candidate pool alike; `include_retired=True` opts back in.
 metadata-only — the chunk, its mention and its embedding are untouched — so restore costs no
 embedding call.
 
-> **Known follow-up.** Because retired lessons are also hidden from `_nearest_learnings`, the
-> consolidation judge can re-learn something you deliberately retired (it will arrive as a fresh
-> `new` row with new citations, not as a resurrection). The fix belongs with the planned 4th judge
-> action `deprecate` — that pass should match against retired lessons with `include_retired=True`.
+**Closing the loop in consolidation.** Hiding retired lessons from search also hides them from the
+judge's own candidate lookup, which would make it re-learn a retired lesson as a fresh `new` row one
+session later — retirement silently undone. So `_nearest_learnings` matches with
+`include_retired=True` and budgets the two kinds separately (up to `_MATCH_POOL` live +
+`_MATCH_RETIRED` retired), so context never displaces a live match the judge might have merged into,
+and retired neighbours are rendered `[RETIRED: <reason>]` in the prompt. The judge then has five
+actions:
+
+| Action | Effect |
+|---|---|
+| `new` | insert the candidate |
+| `update` | patch the target in place + re-embed |
+| `supersede` | insert the candidate, retire the target pointing at it |
+| `deprecate` | retire the target with a `reason`; **nothing is inserted** (no replacement exists) |
+| `drop` | discard the candidate — it only re-learns a `[RETIRED]` lesson |
+
+A retired lesson is never a valid `update`/`supersede`/`deprecate` target (`_valid_target` requires
+liveness), so a stray decision cannot undo a retirement; an invalid target falls through to the
+insert path, which risks a duplicate rather than losing a candidate. `deprecate` and `drop` are
+counted on `ConsolidateResult` and reported by `qmx consolidate` — a candidate that disappears
+without a trace is indistinguishable from one that was never extracted, so neither is silent.
 
 **Hard delete is deliberately absent from the MCP surface.** Its two legitimate uses — flat-out wrong
 with no historical value, and confidentiality (a lesson that captured e.g. a negotiated rate) — are
@@ -114,7 +131,7 @@ flowchart LR
   end
   subgraph LLM["Qwen chat model (see Model decision)"]
     EX["extract<br/>turns → candidate lessons (JSON)"]
-    CO["consolidate<br/>new vs update vs supersede"]
+    CO["consolidate<br/>new · update · supersede<br/>deprecate · drop"]
   end
   subgraph OUT["tier 2 — learnings"]
     L[("learnings table<br/>+ kind=learning vectors")]
@@ -346,6 +363,7 @@ path, not a launch dependency.
 | **D** | `SessionEnd` (consolidate) + `SessionStart` (inject) hooks | new lesson appears after a session; next session is injected with relevant lessons |
 | **E** | **Promotion + per-repo isolation:** repo-keyed store `~/.qmx/memory/<repo-key>/` (+ `_global/`); `qmx lessons --review` + `qmx promote <id>` (type-map, dedup vs this repo's `kind=doc` memory, write frontmatter + per-repo MEMORY.md pointer, set `promoted_to`) | approve an eligible lesson in `xtorch` → a valid md lands in `Cruise__xtorch/` (updates the matching file, not a dup) with its pointer in that dir's MEMORY.md; promoting from a worktree lands in the same repo dir; a `cpe-intelligence` session is never injected with xtorch's files; the promoted learning stops being injected |
 | **F** | **Lifecycle ops (schema v5):** in-place `update_learning`; `deprecate_learning` (+ optional `superseded_by`) / `restore_learning`; retired-hiding enforced in the search arms; `include_retired` opt-in; MCP + CLI surfaces | a wrong lesson is corrected in place (same id, no duplicate); an importance-only edit makes **zero** embedding calls; a retired lesson stops appearing in `lessons` **and** `query --kind learning` and in injection, still lists under `lessons --deprecated` with its reason + replacement, and `restore-learning` brings it back with no re-embed; a v4 DB migrates in place |
+| **G** | **Retirement in the pipeline:** judge actions `deprecate` + `drop`; `_nearest_learnings` matches with `include_retired=True` (live/retired budgeted separately, retired rendered `[RETIRED: reason]`); `_valid_target` requires liveness; `deprecated`/`dropped` counted and reported | the judge retires a wrong lesson with no replacement stored (row count unchanged, reason recorded); a candidate re-learning a retired lesson is dropped instead of re-added as `new`, and the retired lesson provably reaches the prompt; an `update`/`supersede` aimed at a retired target leaves it untouched and inserts instead of losing the candidate |
 
 ## Open questions
 
@@ -360,6 +378,8 @@ path, not a launch dependency.
 5. **Trust** — a learning can encode a wrong conclusion; supersede + importance + the human review
    gate mitigate, and phase F adds correction in place + soft-retire (so a wrong lesson can be fixed
    or silenced, not merely out-weighted). Should low-confidence lessons be quarantined until reused?
-6. **Retirement in consolidation** — the judge's actions are still `new`/`update`/`supersede`; a 4th
-   `deprecate` action (retire with no replacement) is the natural next step, and it must match
-   candidates with `include_retired=True` so it does not re-learn something deliberately retired.
+6. **Re-learning a retired lesson** — `drop` keeps the retirement, deliberately trusting the human's
+   retirement over the model's re-learning; the count surfaces in `qmx consolidate` output. If a
+   lesson keeps getting re-learned, that is a signal the retirement was wrong — should the judge be
+   allowed to `restore` it (currently a human/agent-only op), or should repeated drops just be
+   reported for review? (v1: report, never auto-restore.)

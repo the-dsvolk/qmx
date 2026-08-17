@@ -194,7 +194,7 @@ Beyond raw recall, qmx distils past chats into a **learnings** tier (`kind=learn
 qmx add-learning "raise IAM PRs at project level" --type mistake \
     --detail "bucket-level failed; ask in #platform-security-support" --scope the-dsvolk/qmx
 qmx lessons "how to raise an IAM PR"     # recall, ranked by relevance × importance × recency
-qmx consolidate --session <transcript>   # Qwen distils a chat into lessons (new/update/supersede)
+qmx consolidate --session <transcript>   # Qwen distils a chat into lessons (new/update/supersede/retire)
 qmx lessons --review                     # list promotion-eligible lessons
 qmx promote <id>                         # graduate one into per-repo curated memory
 ```
@@ -215,6 +215,12 @@ Retired lessons stop firing everywhere (`lessons`, `query --kind learning`, sess
 and come back with `--include-retired`; nothing is destroyed, so restore is free. Hard delete is
 intentionally **not** an MCP tool: it is irreversible and reserved for a wrong-with-no-history or
 confidentiality call a human makes.
+
+Consolidation retires too, so the loop closes: the judge's actions are
+**new / update / supersede / deprecate / drop** — it can retire a lesson a session proved wrong with
+nothing to replace it, and, because retired lessons are shown to it flagged `[RETIRED: why]`, it
+`drop`s a candidate that merely re-learns one instead of quietly resurrecting it next session. Both
+counts are reported by `qmx consolidate`, never silent.
 
 **Hooks** (optional, wire in `settings.json` like the `Stop`/capture hook) — inject at start,
 consolidate at end (the latter runs detached so it never blocks session close):
@@ -237,8 +243,9 @@ the running services (the Spark model + the launchd agents).
 ## Status
 
 Capabilities #1–#3 implemented: code search, chat recall, and the **learnings/consolidation** tier
-(schema v5; `add-learning`/`lessons`/`consolidate`/`promote`, in-place `update-learning` +
-`deprecate-learning`/`restore-learning`, and SessionStart/SessionEnd hooks). qmx
+(schema v5; `add-learning`/`lessons`/`promote`, in-place `update-learning`,
+`deprecate-learning`/`restore-learning`, a `consolidate` judge that can
+new/update/supersede/deprecate/drop, and SessionStart/SessionEnd hooks). qmx
 indexes your Claude Code **conversation history** alongside code — `qmx backfill-chats` for past
 transcripts and a `Stop` hook (`qmx capture`) for live turns, recalled via `mcp__qmx__recall`. Built
 on the resident **MCP server**, tree-sitter chunking, incremental indexing, and hybrid **vector +

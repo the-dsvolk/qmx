@@ -487,19 +487,26 @@ def _cmd_consolidate(settings: Settings, args: argparse.Namespace) -> int:
                 targets = [doc_id for doc_id, _ in store.list_documents("chat")]
 
             created = updated = superseded = candidates = 0
+            deprecated = dropped = 0
             for doc_id in targets:
                 res = consolidate_session(store, embedder, chat, doc_id, scope=args.scope)
                 created += res.created
                 updated += res.updated
                 superseded += res.superseded
+                deprecated += res.deprecated
+                dropped += res.dropped
                 candidates += res.candidates
     except (StoreSchemaMismatch, EmbedBackendError, ChatBackendError) as exc:
         print(f"consolidate failed: {exc}", file=sys.stderr)
         return 1
     print(
         f"consolidated {len(targets)} session(s): {candidates} candidate(s) -> "
-        f"{created} new, {updated} updated, {superseded} superseded"
+        f"{created} new, {updated} updated, {superseded} superseded, "
+        f"{deprecated} deprecated, {dropped} dropped"
     )
+    if dropped:
+        # Never let a discarded candidate look like one that was simply never extracted.
+        print(f"  ({dropped} candidate(s) dropped as re-learning retired lessons; -v for which)")
     return 0
 
 

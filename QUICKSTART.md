@@ -294,7 +294,7 @@ chat_model = "qwen3.6:35b-a3b"
 qmx add-learning "raise IAM PRs at project level" --type mistake \
     --detail "bucket-level failed; ask in #platform-security-support" --scope the-dsvolk/qmx
 qmx lessons "how to raise an IAM PR"     # recall, ranked by relevance × importance × recency
-qmx consolidate --session <transcript>   # Qwen distils a chat into lessons (new/update/supersede)
+qmx consolidate --session <transcript>   # Qwen distils a chat into lessons (new/update/supersede/retire)
 qmx lessons --review                     # list promotion-eligible lessons
 qmx promote <id>                         # graduate one into per-repo curated memory
 ```
