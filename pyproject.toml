@@ -7,7 +7,10 @@ requires-python = ">=3.12"
 license = { file = "LICENSE" }
 dependencies = [
     "httpx>=0.27",
-    "mcp>=1.2",
+    # Cap below 2.0: the 2.x SDK dropped `mcp.server.fastmcp`, so `qmx serve` dies with
+    # ModuleNotFoundError. uv.lock pins 1.x for dev/CI, but `uv tool install` resolves fresh and
+    # ignores the lock — without this cap every fresh install ships a server that cannot start.
+    "mcp>=1.2,<2",
     "numpy>=1.26",
     "sqlite-vec>=0.1.6",
     "tree-sitter>=0.23",
