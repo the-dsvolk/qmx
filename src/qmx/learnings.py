@@ -358,3 +358,28 @@ def _parse_anchors(raw: str | None) -> list:
 
 def _clamp01(x: float) -> float:
     return max(0.0, min(1.0, float(x)))
+
+
+def normalize_importance(value: object) -> float:
+    """Coerce a model-supplied ``importance`` onto the documented 0..1 scale.
+
+    The judge is asked for a decimal in 0..1 but sometimes answers on a 1–5 or 1–10 rating scale,
+    and ``importance`` is a *ranking weight* (:data:`W_IMPORTANCE` × importance): a stray ``9.0``
+    contributes 2.7 while the whole relevance term is capped at :data:`W_RELEVANCE` = 0.5, so one
+    mis-scaled lesson outranks every genuinely relevant one, and sails through the promotion gate.
+
+    Rescales by the apparent scale rather than clamping — clamping would flatten every over-range
+    lesson to top priority, which is the same bug with a smaller maximum. Unparseable input falls
+    back to the 0.5 default rather than raising, since this sits on a model-output path.
+    """
+    try:
+        x = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0.5
+    if x != x:  # NaN
+        return 0.5
+    if x > 5.0:  # looks like a 1–10 rating
+        x /= 10.0
+    elif x > 1.0:  # looks like a 1–5 rating
+        x /= 5.0
+    return _clamp01(x)

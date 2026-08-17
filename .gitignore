@@ -24,6 +24,13 @@ chat-md/
 .env.*
 *.token.json
 
+# Agent-tool worktrees. Nested worktrees get committed as bare gitlinks (mode 160000) with no
+# .gitmodules, which breaks `git submodule update --init` and therefore any install straight from
+# the repo (`uv tool install "git+https://github.com/the-dsvolk/qmx"`). Durable worktrees belong
+# outside the checkout anyway — see kb/ conventions: ~/worktrees/<repo>/<branch>.
+.claude/worktrees/
+.cursor/worktrees/
+
 # Editor / OS
 .DS_Store
 .vscode/

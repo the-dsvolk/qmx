@@ -114,6 +114,22 @@ insert path, which risks a duplicate rather than losing a candidate. `deprecate`
 counted on `ConsolidateResult` and reported by `qmx consolidate` — a candidate that disappears
 without a trace is indistinguishable from one that was never extracted, so neither is silent.
 
+**`importance` is a weight, not a rating.** It enters ranking as `W_IMPORTANCE × importance` (0.3)
+while the entire relevance term is capped at `W_RELEVANCE` (0.5), so a lesson stored at 9.0
+contributes 2.7 and outranks every genuinely relevant lesson — and clears the
+`promotable(min_importance=…)` gate for free. The judge is asked for a decimal in 0..1 but sometimes
+answers on a 1–5/1–10 scale, and consolidation's `update` decision used to write that raw number
+straight through `store.update_learning` (only `add_learning` clamped). A real index accumulated
+**281 of 1146** rows above 1.0, max 9.0.
+
+Now guarded in three places: `normalize_importance()` rescales at the model boundary (dividing by 5
+or 10 by apparent scale — *rescaling*, not clamping, since clamping flattens every over-range lesson
+to joint-top priority), the store clamps on both `insert_learning` and `update_learning` so the
+column's range holds for every caller, and the extract prompt spells out "a decimal between 0.0 and
+1.0 (NOT a 1-5 or 1-10 rating)". Existing bad data is repaired with `qmx fix-importance` — a report
+by default, writing only with `--apply`, via a store method that deliberately leaves `updated_at`
+alone so a data fix cannot reorder recall through the recency term.
+
 **Hard delete is deliberately absent from the MCP surface.** Its two legitimate uses — flat-out wrong
 with no historical value, and confidentiality (a lesson that captured e.g. a negotiated rate) — are
 human calls, so it is planned as a CLI-only verb. Two things it must handle when built: purge the

@@ -23,6 +23,7 @@ from qmx.learnings import (
     deprecate_learning,
     learning_to_dict,
     lessons,
+    normalize_importance,
     restore_learning,
     update_learning,
 )
@@ -353,6 +354,40 @@ def _cmd_restore_learning(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_fix_importance(settings: Settings, args: argparse.Namespace) -> int:
+    """Rescale `importance` values above 1.0 (model 1-5/1-10 answers) onto the documented 0..1.
+
+    Reports by default and only writes with ``--apply``: learnings live *only* in the DB (unlike
+    code/chats, which are a rebuildable shadow of files on disk), so a bulk rewrite is not something
+    to do implicitly. ``updated_at`` is left untouched so a repair does not reorder recall.
+    """
+    try:
+        with _open_store(settings) as store:
+            broken = [le for le in store.list_learnings(live_only=False) if le.importance > 1.0]
+            total = len(store.list_learnings(live_only=False))
+            if not broken:
+                print(f"all {total} learning(s) already within 0..1 — nothing to fix")
+                return 0
+            print(f"{len(broken)} of {total} learning(s) have importance > 1.0:")
+            for le in sorted(broken, key=lambda le: le.importance, reverse=True)[: args.show]:
+                print(f"  #{le.learning_id} {le.importance:g} -> "
+                      f"{normalize_importance(le.importance):.2f}  {le.statement[:60]}")
+            if len(broken) > args.show:
+                print(f"  … and {len(broken) - args.show} more")
+            if not args.apply:
+                print("dry run — re-run with --apply to write (back up ~/.qmx/index.db first)")
+                return 0
+            fixed = sum(
+                store.set_learning_importance(le.learning_id, normalize_importance(le.importance))
+                for le in broken
+            )
+    except StoreSchemaMismatch as exc:
+        print(f"fix-importance failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"rescaled {fixed} learning(s) onto 0..1 (updated_at untouched)")
+    return 0
+
+
 def _cmd_lessons(settings: Settings, args: argparse.Namespace) -> int:
     if args.review:
         return _cmd_lessons_review(settings, args)
@@ -597,6 +632,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_res = sub.add_parser("restore-learning", help="un-retire a lesson deprecated by mistake")
     p_res.add_argument("id", type=int, help="learning id to revive")
 
+    p_fix = sub.add_parser(
+        "fix-importance", help="rescale out-of-range importance (>1) onto 0..1; dry run by default"
+    )
+    p_fix.add_argument("--apply", action="store_true", help="write the changes (default: report)")
+    p_fix.add_argument("--show", type=int, default=10, help="how many examples to list (def 10)")
+
     p_con = sub.add_parser("consolidate", help="distil chat turns into learnings (Qwen)")
     p_con.add_argument("--session", default=None, help="a transcript .jsonl to consolidate")
     p_con.add_argument("--all", action="store_true", help="consolidate every indexed chat doc")
@@ -661,6 +702,7 @@ _COMMANDS = {
     "update-learning": _cmd_update_learning,
     "deprecate-learning": _cmd_deprecate_learning,
     "restore-learning": _cmd_restore_learning,
+    "fix-importance": _cmd_fix_importance,
     "lessons": _cmd_lessons,
     "promote": _cmd_promote,
     "consolidate": _cmd_consolidate,

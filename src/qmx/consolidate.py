@@ -27,7 +27,13 @@ from dataclasses import dataclass, field
 
 from qmx.chat import ChatModel
 from qmx.embed import Embedder
-from qmx.learnings import LEARNING_TYPES, add_learning, deprecate_learning, reembed_learning
+from qmx.learnings import (
+    LEARNING_TYPES,
+    add_learning,
+    deprecate_learning,
+    normalize_importance,
+    reembed_learning,
+)
 from qmx.store import Learning, Store
 
 log = logging.getLogger("qmx.consolidate")
@@ -44,7 +50,8 @@ EXTRACT_SYSTEM = (
     "Keep only lessons worth recalling next time: a decision and why, a mistake and its "
     "correction, or a repeatable how-to. Drop chit-chat, one-offs, and restated context. "
     "Each lesson: a crisp one-sentence `statement`, a `detail` (the why/correction/better way), "
-    "a `type` (decision|mistake|howto), a short `topic` slug, and an `importance` 0..1. "
+    "a `type` (decision|mistake|howto), a short `topic` slug, and an `importance` as a decimal "
+    "between 0.0 and 1.0 (e.g. 0.8 — NOT a 1-5 or 1-10 rating). "
     "Return JSON {\"learnings\": [...]}; return an empty list if nothing is durable."
 )
 
@@ -149,7 +156,10 @@ def consolidate_candidate(
     action = decision.get("action", "new")
     statement = decision.get("statement") or candidate["statement"]
     detail = decision.get("detail") or candidate.get("detail")
-    importance = decision.get("importance", candidate.get("importance", 0.5))
+    # Rescale here, at the model boundary: the judge is asked for 0..1 but sometimes answers on a
+    # 1–5/1–10 scale, and importance is a ranking weight — an unscaled 9.0 buries every relevant
+    # lesson. `add_learning` clamped, but the `update` path wrote the raw number straight through.
+    importance = normalize_importance(decision.get("importance", candidate.get("importance", 0.5)))
     target_id = decision.get("target_id")
 
     if action == "drop":
