@@ -208,7 +208,13 @@ qmx update-learning 42 --statement "…" --clear-detail # fix the wording in pla
 qmx deprecate-learning 42 --reason "renegotiated" --superseded-by 57   # soft-retire + breadcrumb
 qmx lessons --deprecated                             # what's retired, why, and what replaced it
 qmx restore-learning 42                              # undo
+qmx fix-importance                                   # report lessons whose importance escaped 0..1
 ```
+
+> `importance` is a ranking **weight** in 0..1, not a 1–5 rating: it enters the blend as
+> `0.3 × importance` against a relevance term capped at 0.5, so a lesson stored at 9.0 outranks
+> everything relevant. Writes are normalised and clamped; `qmx fix-importance --apply` repairs rows
+> written before that guard existed.
 
 `deprecate` needs **no** replacement — that is the case `superseded_by` alone could not express.
 Retired lessons stop firing everywhere (`lessons`, `query --kind learning`, session-start injection)

@@ -50,6 +50,11 @@ def hash_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _clamp01(x: float) -> float:
+    """Hard bound for ``learnings.importance`` — the column is documented 0..1 and ranked on."""
+    return max(0.0, min(1.0, float(x)))
+
+
 @dataclass(slots=True)
 class Chunk:
     """One indexable unit of a document."""
@@ -680,7 +685,13 @@ class Store:
         source_anchors: str | None = None,
         doc_id: int | None = None,
     ) -> int:
-        """Insert a learnings row; returns its ``learning_id``. Embedding is done separately."""
+        """Insert a learnings row; returns its ``learning_id``. Embedding is done separately.
+
+        ``importance`` is clamped here so the column's documented 0..1 range holds for **every**
+        caller, not just the ones that remember (see :func:`qmx.learnings.normalize_importance` for
+        why an out-of-range weight breaks ranking).
+        """
+        importance = _clamp01(importance)
         cur = self._conn.execute(
             """
             INSERT INTO learnings(
@@ -794,9 +805,13 @@ class Store:
 
         Every field defaults to :data:`KEEP` (leave alone), so passing ``None`` for a nullable
         column (``topic``/``scope``/``detail``/``source_anchors``) **clears** it — that is how a
-        lesson is re-scoped to global. Callers own validation of ``type``/``importance``
+        lesson is re-scoped to global. Callers own validation of ``type``
         (see :func:`qmx.learnings.update_learning`); re-embedding is a separate step.
+        ``importance`` is clamped to 0..1 here, since this is the path consolidation's ``update``
+        decision writes through with the judge's raw number.
         """
+        if not isinstance(importance, Keep):
+            importance = _clamp01(importance)
         sets: list[str] = []
         params: list[object] = []
         for col, val in (
@@ -856,6 +871,20 @@ class Store:
             )
         return cur.rowcount > 0
 
+
+    def set_learning_importance(self, learning_id: int, importance: float) -> bool:
+        """Set ``importance`` alone, **without** bumping ``updated_at``.
+
+        For data repair (``qmx fix-importance``): ``updated_at`` feeds the recency half of the
+        ranking blend, so rewriting hundreds of rows through the normal patch path would make every
+        repaired lesson look freshly learned and reorder recall as a side effect of a fix.
+        """
+        with self._conn:
+            cur = self._conn.execute(
+                "UPDATE learnings SET importance=? WHERE learning_id=?",
+                (_clamp01(importance), learning_id),
+            )
+        return cur.rowcount > 0
 
     def touch_learning(self, learning_id: int) -> None:
         """Record a lesson firing (retrieved/injected): bump ``reuse_count`` + ``last_fired_at``."""
