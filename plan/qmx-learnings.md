@@ -4,7 +4,7 @@
 > CLI `add-learning`/`update-learning`/`deprecate-learning`/`restore-learning`/`lessons`
 > (`--review`, `--deprecated`, `--include-retired`)/`consolidate`/`promote`, MCP `lessons` +
 > `add_learning`/`update_learning`/`deprecate_learning`/`restore_learning`, and SessionStart/SessionEnd
-> hooks. Model is config-driven (`chat_model`, default `qwen3.6:35b-a3b`).
+> hooks. Model is config-driven (`chat_model`, default `qwen3.8:27b-mtp-q8_0`).
 
 Turns **raw recall** (`kind=chat` — past turns verbatim) into a **distilled tier** of reusable
 lessons (`kind=learning`): *decisions*, *mistakes+corrections*, and *how-tos*, auto-drafted from
@@ -368,6 +368,25 @@ feasibility**; and (c) throughput is irrelevant for a batch job. **Decision: v1 
 `qwen3.6:35b-a3b` on Ollama.** Only if v1 lesson quality proves insufficient do we move *the
 consolidation model specifically* to **`Qwen3.5-122B-A10B` NVFP4 on vLLM** — a documented upgrade
 path, not a launch dependency.
+
+> **Superseded 2026-08-22 — v2 judge is [`qwen3.8:27b-mtp-q8_0`](https://ollama.com/library/qwen3.8).**
+> Qwen3.8 shipped 2026-08-03 (Max) with **`Qwen3.8-27B` open weights Apache-2.0 on 2026-08-13**, and
+> Ollama packages it. It supersedes the v1 pick on every axis that matters here:
+>
+> - **Precision goes up, not down.** v1 ran Q4_K_M (~23 GB). v2 is **Q8_0 (~30 GB)** — the judge is
+>   the one component where quality matters, so we deliberately rejected the faster 4-bit builds
+>   (`27b-nvfp4`, `27b-q4_K_M`, both 18 GB) rather than trade judgment for decode speed.
+> - **`mtp-` = multi-token prediction** (speculative decoding). Output is verified against the base
+>   model, so it recovers speed *without* a quality cost — the reason we take Q8_0's larger footprint.
+> - **256K context** (vs. the 3.6-era window) directly helps the long-transcript consolidation input.
+> - **Dense 27B, not 35B/3B-active MoE.** Fewer total params but ~9× the active params per token,
+>   which is the right trade for a batch job where throughput is irrelevant and judgment is not.
+>
+> **Prerequisite:** Ollama **≥ 0.32.2** — 0.32.1 fails the pull with `pull model manifest: 412`
+> (client-version floor; the registry manifest itself resolves fine). See [`INFRA.md`](../INFRA.md).
+>
+> The NVFP4/vLLM path above stays deferred and is now *less* compelling: v2 already gets a
+> higher-precision judge on the existing Ollama stack with no new serving infra.
 
 ## Phasing
 

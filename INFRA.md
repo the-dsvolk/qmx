@@ -155,11 +155,24 @@ just pull the model:
 
 ```bash
 export OLLAMA_HOST=127.0.0.1:11434
-~/.local/ollama/bin/ollama pull qwen3.6:35b-a3b   # MoE 35B/3B-active; ~23 GB, fits the ~118 GB VRAM
-~/.local/ollama/bin/ollama list                   # confirm it appears alongside qwen3-embedding:0.6b
+~/.local/ollama/bin/ollama pull qwen3.8:27b-mtp-q8_0   # 27B dense, Q8_0; ~30 GB of the ~118 GB VRAM
+~/.local/ollama/bin/ollama list                        # confirm it sits alongside qwen3-embedding:0.6b
 ```
 
-> **Verified working (2026-07-18).** Pulled on the Spark (`qwen3.6:35b-a3b`, 23 GB, MoE) and served by
+> **Requires Ollama ≥ 0.32.2.** `qwen3.8` is a new architecture; older clients fail the pull with
+> `pull model manifest: 412` and "download the latest version" (the registry manifest is fine — it's
+> purely a client-version floor). The Spark ran 0.32.1, so this upgrade is a prerequisite:
+> `curl -fsSL https://ollama.com/install.sh | sh` (or drop a new binary at
+> `~/.local/ollama/bin/ollama`), then `systemctl --user restart ollama`. Note the restart evicts all
+> resident models — with `OLLAMA_KEEP_ALIVE=-1` they reload on next use, `qwen3-coder-next` included.
+
+> **Why Q8_0 and not `27b-nvfp4`.** The tag list offers `27b-nvfp4` and `27b-q4_K_M` (18 GB) which
+> are *faster* but 4-bit. The judge is the one place quality matters, and the model it replaces was
+> already Q4_K_M — so we move **up** to Q8_0 rather than sideways into another 4-bit format. The
+> `mtp-` prefix is multi-token prediction (speculative decoding): verified output, so it buys decode
+> speed without a quality trade. `27b-bf16` (56 GB) would not co-reside with `qwen3-coder-next`.
+
+> **Verified working (2026-07-18, on the superseded `qwen3.6:35b-a3b`).** Pulled on the Spark and served by
 > the shared Ollama. Verified **end-to-end from the client**: on the Mac, `Settings.load()` →
 > `OllamaChat` → the production `extract_learnings` path (`think=false` + schema-constrained `format`)
 > reaches the Spark over `QMX_OLLAMA_URL` and returns a valid `{"learnings":[…]}` extraction with
@@ -169,14 +182,14 @@ export OLLAMA_HOST=127.0.0.1:11434
 - **Where it's configured — on the client, not here.** Consolidation runs where the CLI/hooks run
   (the Mac), talking to *this* Ollama over `QMX_OLLAMA_URL`; the Spark's resident MCP server never
   calls the chat model (it only serves retrieval). So the Spark just needs the model **pulled**; the
-  model *name* is set on the Mac in **`~/.qmx/config.toml`** (`chat_model = "qwen3.6:35b-a3b"`, or
-  `QMX_CHAT_MODEL`) — see the Mac section below. Default is `qwen3.6:35b-a3b`, never hardcoded; to
-  swap models, pull the new tag on the Spark and change that one value.
+  model *name* is set on the Mac in **`~/.qmx/config.toml`** (`chat_model = "qwen3.8:27b-mtp-q8_0"`,
+  or `QMX_CHAT_MODEL`) — see the Mac section below. Default is `qwen3.8:27b-mtp-q8_0`, never
+  hardcoded; to swap models, pull the new tag on the Spark and change that one value.
 - **Batch, low-QPS.** Consolidation is a few calls at session end, so throughput is irrelevant;
   `session-end` runs it **detached** so it never blocks a session closing. Nothing is resident.
-- **Deferred upgrade (only if v1 lessons are weak):** a `Qwen3.5-122B-A10B` in **NVFP4** on a
-  **vLLM** server (NVFP4 ≠ GGUF → not Ollama). Point `chat_model`/`QMX_OLLAMA_URL` at it if built.
-  See [`plan/qmx-learnings.md`](./plan/qmx-learnings.md) (*Model decision*).
+- **Deferred upgrade (only if lesson quality is weak):** a larger judge on a **vLLM** server —
+  `qwen3.8:27b-bf16` if VRAM frees up, or a Max-class Qwen. Point `chat_model`/`QMX_OLLAMA_URL` at it
+  if built. See [`plan/qmx-learnings.md`](./plan/qmx-learnings.md) (*Model decision*).
 
 Client-side hooks that call this model (`SessionStart` inject, `SessionEnd` consolidate) are wired in
 Claude Code `settings.json` on the Mac — see the **Learnings** section of [`README.md`](./README.md).
@@ -187,7 +200,7 @@ Claude Code `settings.json` on the Mac — see the **Learnings** section of [`RE
 - Config `~/.qmx/config.toml`: `ollama_url = "http://spark-0e81.local:11434"`,
   `embed_model = "qwen3-embedding:0.6b"`, `embed_dim = 1024`, `mcp_host = "127.0.0.1"`,
   `mcp_port = 8765`. Index at `~/.qmx/index.db`.
-  - **Learnings model:** `chat_model = "qwen3.6:35b-a3b"` (the consolidation judge — this is the one
+  - **Learnings model:** `chat_model = "qwen3.8:27b-mtp-q8_0"` (the consolidation judge — this is the one
     the `qmx consolidate` / `session-end` hook uses against the Spark's Ollama; must be pulled there).
     It defaults to this value, so the line is optional unless you swap models.
   - **Reranker (optional):** `rerank_url = "http://spark-0e81.local:8081"` enables the cross-encoder.
