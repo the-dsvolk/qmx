@@ -14,7 +14,7 @@
   - `qwen3-embedding` — embeddings (vector search), served by Ollama (`/api/embed`)
   - `qwen3-reranker` — final-stage reranking, served by **llama.cpp `llama-server --reranking`**
     (Ollama has no rerank endpoint) — see [qmx-ml-notes.md](./qmx-ml-notes.md) TD-1
-  - a Qwen chat model (e.g. `qwen3.6:35b-a3b`) — chat-turn summarization / consolidation
+  - a Qwen chat model (e.g. `qwen3.8:27b-mtp-q8_0`) — chat-turn summarization / consolidation
 - **Interface:** a **resident MCP server** (pay startup once) + a thin CLI for indexing/admin.
 - **Store:** SQLite + `sqlite-vec` (vectors) + FTS5 (BM25). Files on disk are the source of truth;
   the DB is a **rebuildable shadow index**.

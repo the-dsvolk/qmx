@@ -2,8 +2,8 @@
 
 The consolidation model (extract + supersede judgment) is the one qmx component where model quality
 matters (see ``plan/qmx-learnings.md``). Like :mod:`qmx.embed`, qmx never loads it in-process — it
-POSTs to Ollama (``chat_model``, e.g. ``qwen3.6:35b-a3b``, served on the Spark). The protocol is the
-seam that lets tests swap a deterministic fake with no backend.
+POSTs to Ollama (``chat_model``, e.g. ``qwen3.8:27b-mtp-q8_0``, served on the Spark). The protocol
+is the seam that lets tests swap a deterministic fake with no backend.
 
 JSON is requested via Ollama's ``format`` field (schema-constrained decoding) so the reply parses
 without brittle text scraping; :func:`ChatModel.complete_json` returns the parsed object.

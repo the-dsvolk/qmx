@@ -281,11 +281,11 @@ at it. It runs on the same Ollama the embeddings use — see [`INFRA.md`](./INFR
 setup:
 
 ```bash
-ollama pull qwen3.6:35b-a3b     # on the Ollama host (the Spark); ~23 GB
+ollama pull qwen3.8:27b-mtp-q8_0   # on the Ollama host (the Spark); ~30 GB, needs Ollama >= 0.32.2
 ```
 ```toml
 # ~/.qmx/config.toml — optional; this is the default, add only to override
-chat_model = "qwen3.6:35b-a3b"
+chat_model = "qwen3.8:27b-mtp-q8_0"
 ```
 
 **B. Use it from the CLI:**

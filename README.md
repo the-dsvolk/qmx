@@ -188,7 +188,7 @@ Beyond raw recall, qmx distils past chats into a **learnings** tier (`kind=learn
 *decisions*, *mistakes+corrections*, and *how-tos* — deduped/superseded so they self-correct, and
 **proactively injected at session start** so an agent begins already knowing. See
 [`plan/qmx-learnings.md`](./plan/qmx-learnings.md) for the design; the model (a Qwen chat model, e.g.
-`qwen3.6:35b-a3b`) is config-driven via `chat_model`, never hardcoded.
+`qwen3.8:27b-mtp-q8_0`) is config-driven via `chat_model`, never hardcoded.
 
 ```bash
 qmx add-learning "raise IAM PRs at project level" --type mistake \
