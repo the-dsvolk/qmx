@@ -339,6 +339,34 @@ triggers* section of [`INFRA.md`](./INFRA.md).
 > Consolidation runs **on the client** (transcripts + index live here; it calls the backend only for
 > the model). Requires the installed `qmx` to include the learnings commands (`uv tool upgrade qmx`).
 
+## When the Spark is off (degraded mode)
+
+The index is local SQLite, so **queries still answer with the backend down** — qmx drops the vector
+arm and returns BM25 (keyword) results instead of failing:
+
+```bash
+$ qmx query "how do I connect to the spark over ssh" -k 3
+warning: embedding backend unreachable — showing keyword-only (BM25) results
+ 1. [0.0164] ~/.claude/projects/…/memory/dgx-spark-ssh-connect.md:1
+```
+
+Over MCP the same thing happens silently, except each hit carries a `degraded` field so the agent
+knows the results are keyword-matched. `qmx status` reports `ollama_ok` (live ping) and, from the
+MCP tool, `degraded`.
+
+What this costs and what it doesn't:
+
+| | with the backend down |
+|---|---|
+| `query` / `recall` / `lessons` | work, keyword-only; first call ~5–7s, then instant for 30s |
+| `get` / `status` | unaffected (pure index reads) |
+| rerank stage | skipped (it lives on the same box) |
+| `qmx capture` (Stop hook) | gives up in seconds; the turns are indexed by the next capture |
+| `index` / `backfill-chats` / `consolidate` | **fail** — embedding is the whole job; re-run later |
+
+Most of that first-call latency is mDNS: resolving an offline `spark-0e81.local` costs a fixed ~5s
+before any connect timeout applies. Using the Spark's IP in `~/.qmx/config.toml` avoids it.
+
 ## Verifying a query actually hit qmx
 
 Tail the server log while you ask a question:

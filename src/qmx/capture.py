@@ -4,6 +4,12 @@ The hook feeds JSON on stdin (`transcript_path`, `session_id`, `cwd`, `hook_even
 incrementally index that transcript. It is **best-effort and must never fail a turn**: any error is
 swallowed and we exit 0. Cheap because re-indexing a transcript only embeds the newest turn(s)
 (per-chunk dedup handles the rest — see :func:`qmx.index.index_transcript`).
+
+"Never fail a turn" includes never *stalling* one, so this uses
+:func:`~qmx.embed.interactive_embedder` rather than the indexing defaults: with the Spark off, the
+hook gives up in seconds instead of walking a multi-minute retry ladder on every turn. Nothing is
+lost — indexing is incremental, so the skipped turns are picked up by the next capture or
+``qmx refresh`` once the backend is back.
 """
 
 from __future__ import annotations
@@ -14,7 +20,7 @@ from pathlib import Path
 
 from qmx.chunk.chat import ChatSource
 from qmx.config import Settings
-from qmx.embed import OllamaEmbedder
+from qmx.embed import interactive_embedder
 from qmx.index import index_memory_dir, index_transcript
 from qmx.store import Store
 
@@ -34,7 +40,7 @@ def capture(stdin_text: str, settings: Settings, source: ChatSource = "claude") 
             return 0
         with (
             Store.open(settings.db_path, settings.embed_dim, settings.embed_model) as store,
-            OllamaEmbedder(settings) as embedder,
+            interactive_embedder(settings) as embedder,
         ):
             stats = index_transcript(transcript_path, store, embedder, source=source)
             # Also refresh this project's curated memory (sibling `memory/` of the transcript).

@@ -3,19 +3,26 @@
 Ranking is RRF over the vector and BM25 arms. An optional :class:`~qmx.rerank.Reranker` reorders
 the fused top candidates when ``rerank_url`` is set (a Qwen3-Reranker via llama.cpp on the Spark);
 it is off by default (RRF-only) and fails soft to RRF order — see ``plan/qmx-ml-notes.md`` TD-1.
+
+Both remote arms fail soft, so a query is still answered when the Spark is off: BM25 is pure local
+SQLite (FTS5), and an unreachable embedding backend drops the vector arm rather than raising.
+Callers that want to say so can read ``CircuitBreakerEmbedder.degraded``.
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from qmx.embed import Embedder
+from qmx.embed import EmbedBackendError, Embedder
 from qmx.store import SearchHit, Store
 
 if TYPE_CHECKING:
     from qmx.rerank import Reranker
+
+log = logging.getLogger("qmx.search")
 
 RRF_K = 60  # standard RRF damping constant
 
@@ -55,11 +62,22 @@ def search(
     ``k``; otherwise the RRF top-``k`` is returned (see ``plan/qmx-ml-notes.md`` TD-1).
     ``include_retired`` opts back into superseded/soft-retired lessons, hidden by default in both
     arms (:meth:`~qmx.store.Store.retired_learning_docs`).
+
+    If the embedding backend is unreachable this degrades to BM25-only instead of raising —
+    keyword results beat no results, and the index itself is local.
     """
     pool = pool or max(4 * k, 20)
-    [query_vec] = embedder.embed([query])
+    try:
+        [query_vec] = embedder.embed([query])
+    except EmbedBackendError as exc:
+        log.warning("embedding backend unavailable, degrading to BM25-only: %s", exc)
+        query_vec = None
 
-    vec_hits = store.search_vec(query_vec, k=pool, kind=kind, include_retired=include_retired)
+    vec_hits = (
+        []
+        if query_vec is None
+        else store.search_vec(query_vec, k=pool, kind=kind, include_retired=include_retired)
+    )
     fts_hits = store.search_fts(query, k=pool, kind=kind, include_retired=include_retired)
 
     by_id: dict[int, SearchHit] = {h.chunk_id: h for h in vec_hits}
@@ -69,6 +87,11 @@ def search(
     fused = reciprocal_rank_fusion([[h.chunk_id for h in vec_hits], [h.chunk_id for h in fts_hits]])
     ranked = sorted(fused.items(), key=lambda kv: kv[1], reverse=True)
     # Rerank a wider candidate pool (then trim to k); without a reranker, RRF top-k is final.
+    # A degraded query skips reranking as well: the reranker is a second service on the same GPU
+    # box as the embedding backend, so it is almost certainly gone too, and waiting to find out
+    # costs more than the ordering is worth once we are already answering keyword-only.
+    if query_vec is None:
+        reranker = None
     take = max(k, rerank_pool) if reranker is not None else k
     hits = [RankedHit(hit=by_id[cid], score=score) for cid, score in ranked[:take]]
     if reranker is not None:
