@@ -4,11 +4,18 @@ Default is RRF-only (``NoOpReranker``). When ``rerank_url`` is set, :class:`Http
 calls a Cohere-style ``/v1/rerank`` endpoint — in our deployment that's **llama.cpp `llama-server
 --reranking` serving Qwen3-Reranker on the Spark GPU** (see ``plan/qmx-ml-notes.md`` TD-1). It's a
 thin HTTP client and **fails soft**: if the rerank server is unreachable, the RRF order is kept.
+
+Failing soft is not enough when the Spark is off — waiting out a 30s read timeout on every query
+is its own outage. So the connect phase gets a short budget (a host that is not there says so
+immediately) while a real rerank keeps the full read budget, and one failure parks the server for
+``CIRCUIT_COOLDOWN`` seconds so a resident server does not re-pay even that.
 """
 
 from __future__ import annotations
 
 import logging
+import time
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import httpx
@@ -18,6 +25,13 @@ if TYPE_CHECKING:
     from qmx.search import RankedHit
 
 log = logging.getLogger("qmx.rerank")
+
+# Reranking a full candidate pool on the GPU can legitimately take seconds, so the read budget
+# stays generous; reaching an absent host should not, so the connect budget is short.
+CONNECT_TIMEOUT = 2.0
+
+# How long an unreachable rerank server is skipped outright before the next attempt.
+CIRCUIT_COOLDOWN = 30.0
 
 
 @runtime_checkable
@@ -50,14 +64,23 @@ class HttpReranker:
         model: str | None = None,
         timeout: float = 30.0,
         client: httpx.Client | None = None,
+        cooldown: float = CIRCUIT_COOLDOWN,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         base = url.rstrip("/")
         self._endpoint = base if base.endswith("rerank") else f"{base}/v1/rerank"
         self._model = model
-        self._client = client or httpx.Client(timeout=timeout)
+        self._client = client or httpx.Client(
+            timeout=httpx.Timeout(timeout, connect=CONNECT_TIMEOUT)
+        )
+        self._cooldown = cooldown
+        self._clock = clock
+        self._open_until = 0.0
 
     def rerank(self, query: str, hits: list[RankedHit]) -> list[RankedHit]:
         if not hits:
+            return hits
+        if self._clock() < self._open_until:  # server known down; don't wait on it again
             return hits
         payload: dict = {"query": query, "documents": [h.hit.text for h in hits]}
         if self._model:
@@ -68,7 +91,9 @@ class HttpReranker:
             results = resp.json()["results"]
         except (httpx.HTTPError, KeyError, ValueError) as exc:
             log.warning("rerank unavailable, keeping RRF order: %s", exc)
+            self._open_until = self._clock() + self._cooldown
             return hits
+        self._open_until = 0.0
 
         ordered: list[RankedHit] = []
         seen: set[int] = set()

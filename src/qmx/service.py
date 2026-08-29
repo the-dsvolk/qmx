@@ -3,14 +3,17 @@
 One place that owns "open the store, run a search, shape a JSON-friendly result", so the MCP tools
 stay thin. Each call opens a short-lived store connection (SQLite WAL handles concurrent readers);
 the embedder/HTTP client is shared for the service's lifetime.
+
+Reads survive a missing embedding backend: the embedder is wrapped in a
+:class:`~qmx.embed.CircuitBreakerEmbedder` so one timeout is enough to mark it down, and
+:func:`~qmx.search.search` then answers BM25-only from the local index. Results carry a
+``degraded`` note in that case so the calling agent knows they are keyword-matched.
 """
 
 from __future__ import annotations
 
-import httpx
-
 from qmx.config import Settings
-from qmx.embed import Embedder, OllamaEmbedder
+from qmx.embed import CircuitBreakerEmbedder, Embedder, ping_ollama, read_embedder
 from qmx.learnings import (
     add_learning,
     deprecate_learning,
@@ -25,6 +28,10 @@ from qmx.store import KEEP, Learning, SearchHit, Store
 
 MAX_TEXT_CHARS = 4000  # cap chunk text returned to an agent so results stay compact
 
+# Attached to every hit returned while the embedding backend is down, so an agent can weigh the
+# results (and, if it matters, re-run the query once `status.ollama_ok` is true again).
+DEGRADED_NOTE = "bm25-only: embedding backend unreachable, results are keyword-matched"
+
 
 class QmxService:
     """Operations backing the MCP tools: ``query`` / ``recall`` / ``lessons`` / ``get`` / ``status``
@@ -33,8 +40,17 @@ class QmxService:
 
     def __init__(self, settings: Settings, embedder: Embedder | None = None) -> None:
         self._settings = settings
-        self._embedder = embedder if embedder is not None else OllamaEmbedder(settings)
+        self._embedder = (
+            CircuitBreakerEmbedder(embedder) if embedder is not None else read_embedder(settings)
+        )
         self._reranker = make_reranker(settings)  # None unless rerank_url is configured
+
+    def _mark(self, rows: list[dict]) -> list[dict]:
+        """Tag results keyword-only when the vector arm was skipped, so an agent can tell."""
+        if self._embedder.degraded:
+            for row in rows:
+                row["degraded"] = DEGRADED_NOTE
+        return rows
 
     def _store(self) -> Store:
         return Store.open(
@@ -45,13 +61,13 @@ class QmxService:
         """Hybrid (vector + BM25 -> RRF, optional rerank) search; JSON-friendly hits."""
         with self._store() as store:
             results = search(store, self._embedder, text, k=k, kind=kind, reranker=self._reranker)
-            return [_hit_dict(r.hit, score=r.score) for r in results]
+            return self._mark([_hit_dict(r.hit, score=r.score) for r in results])
 
     def recall(self, text: str, k: int = 5) -> list[dict]:
         """Search **chat** memory only (``kind='chat'``) — past Claude Code conversation turns."""
         with self._store() as store:
             results = search(store, self._embedder, text, k=k, kind="chat", reranker=self._reranker)
-            return [_hit_dict(r.hit, score=r.score) for r in results]
+            return self._mark([_hit_dict(r.hit, score=r.score) for r in results])
 
     def lessons(
         self,
@@ -63,15 +79,17 @@ class QmxService:
     ) -> list[dict]:
         """Retrieve distilled lessons (``kind='learning'``) by relevance×importance×recency."""
         with self._store() as store:
-            return lessons(
-                store,
-                self._embedder,
-                query,
-                k=k,
-                type=type,
-                scope=scope,
-                include_retired=include_retired,
-                reranker=self._reranker,
+            return self._mark(
+                lessons(
+                    store,
+                    self._embedder,
+                    query,
+                    k=k,
+                    type=type,
+                    scope=scope,
+                    include_retired=include_retired,
+                    reranker=self._reranker,
+                )
             )
 
     def add_learning(
@@ -148,22 +166,20 @@ class QmxService:
         return None if hit is None else _hit_dict(hit, score=None, full=True)
 
     def status(self) -> dict:
-        """Index stats + backend health, for ops and the MCP ``status`` tool."""
+        """Index stats + backend health, for ops and the MCP ``status`` tool.
+
+        ``ollama_ok`` is a live ping; ``degraded`` is whether search is currently answering
+        BM25-only because the embedding backend failed within the circuit-breaker cooldown.
+        """
         with self._store() as store:
             index = store.index_stats()
         return {
             "index": index,
             "embed_model": self._settings.embed_model,
             "ollama_url": self._settings.ollama_url,
-            "ollama_ok": self._ping(),
+            "ollama_ok": ping_ollama(self._settings),
+            "degraded": self._embedder.degraded,
         }
-
-    def _ping(self) -> bool:
-        try:
-            resp = httpx.get(f"{self._settings.ollama_url.rstrip('/')}/api/version", timeout=2.0)
-            return resp.status_code == 200
-        except httpx.HTTPError:
-            return False
 
 
 def _learning_or_none(learning: Learning | None) -> dict | None:

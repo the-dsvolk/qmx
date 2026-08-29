@@ -258,6 +258,10 @@ on the resident **MCP server**, tree-sitter chunking, incremental indexing, and 
 BM25 → RRF** search — with an optional **Qwen3-Reranker** stage (llama.cpp on the Spark GPU; see
 [`plan/qmx-ml-notes.md`](./plan/qmx-ml-notes.md)). See [`plan/`](./plan) for the design.
 
+Because the index is local, **search keeps working when the model backend is off** — qmx degrades
+to keyword-only (BM25) results and flags them, rather than failing. See *When the Spark is off* in
+[`QUICKSTART.md`](./QUICKSTART.md).
+
 ## Development
 
 Python 3.12 + [`uv`](https://docs.astral.sh/uv/). The model backend (Ollama) runs on the DGX Spark

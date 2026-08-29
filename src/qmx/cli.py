@@ -16,7 +16,13 @@ from qmx.capture import capture
 from qmx.chat import ChatBackendError, OllamaChat
 from qmx.config import Settings
 from qmx.consolidate import consolidate_session
-from qmx.embed import EmbedBackendError, OllamaEmbedder
+from qmx.embed import (
+    CircuitBreakerEmbedder,
+    EmbedBackendError,
+    OllamaEmbedder,
+    ping_ollama,
+    read_embedder,
+)
 from qmx.index import backfill_chats, index_memory, index_paths, index_transcript
 from qmx.learnings import (
     add_learning,
@@ -41,6 +47,14 @@ def _open_store(settings: Settings) -> Store:
     return Store.open(settings.db_path, settings.embed_dim, settings.embed_model)
 
 
+def _warn_if_degraded(embedder: CircuitBreakerEmbedder) -> None:
+    if embedder.degraded:
+        print(
+            "warning: embedding backend unreachable — showing keyword-only (BM25) results",
+            file=sys.stderr,
+        )
+
+
 def _cmd_status(settings: Settings, args: argparse.Namespace) -> int:
     info: dict[str, object] = {"config": settings.as_dict()}
     try:
@@ -48,6 +62,9 @@ def _cmd_status(settings: Settings, args: argparse.Namespace) -> int:
             info["index"] = store.index_stats()
     except StoreSchemaMismatch as exc:
         info["index_error"] = str(exc)
+    # Whether the model backend is up decides what still works: with it down, reads degrade to
+    # BM25-only and indexing/consolidation have to wait.
+    info["ollama_ok"] = ping_ollama(settings)
     print(json.dumps(info, indent=2))
     return 0
 
@@ -247,10 +264,11 @@ def _cmd_serve(settings: Settings, args: argparse.Namespace) -> int:
 def _cmd_query(settings: Settings, args: argparse.Namespace) -> int:
     reranker = make_reranker(settings)
     try:
-        with _open_store(settings) as store, OllamaEmbedder(settings) as embedder:
+        with _open_store(settings) as store, read_embedder(settings) as embedder:
             results = search(
                 store, embedder, args.text, k=args.k, kind=args.kind, reranker=reranker
             )
+            _warn_if_degraded(embedder)
     except (StoreSchemaMismatch, EmbedBackendError) as exc:
         print(f"query failed: {exc}", file=sys.stderr)
         return 1
@@ -398,7 +416,7 @@ def _cmd_lessons(settings: Settings, args: argparse.Namespace) -> int:
         return 2
     reranker = make_reranker(settings)
     try:
-        with _open_store(settings) as store, OllamaEmbedder(settings) as embedder:
+        with _open_store(settings) as store, read_embedder(settings) as embedder:
             results = lessons(
                 store,
                 embedder,
@@ -409,6 +427,7 @@ def _cmd_lessons(settings: Settings, args: argparse.Namespace) -> int:
                 include_retired=args.include_retired,
                 reranker=reranker,
             )
+            _warn_if_degraded(embedder)
     except (StoreSchemaMismatch, EmbedBackendError) as exc:
         print(f"lessons failed: {exc}", file=sys.stderr)
         return 1
