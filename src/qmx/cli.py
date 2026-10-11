@@ -1,7 +1,9 @@
 """qmx CLI — thin admin surface over the store/embed/index/search layers.
 
 Ships ``status`` / ``index`` / ``query`` / ``watch`` / ``sources`` / ``remove`` / ``gc`` /
-``serve``, plus ``backfill-chats`` and ``capture`` (chat memory) per ``plan/qmx-plan.md``.
+``serve``, plus ``backfill-chats`` and ``capture`` (chat memory) per ``plan/qmx-plan.md``, and the
+parked-items verbs ``park`` / ``parked`` / ``unpark`` / ``reopen`` / ``keep``
+(``plan/qmx-parked.md``).
 """
 
 from __future__ import annotations
@@ -33,9 +35,12 @@ from qmx.learnings import (
     restore_learning,
     update_learning,
 )
+from qmx.parked import ParkedNotFound, ParkedRepo, sync_index
 from qmx.promote import PromotionError, promotable, promote
 from qmx.rerank import make_reranker
+from qmx.scope import canonical_repo_key
 from qmx.search import search
+from qmx.service import QmxService
 from qmx.session import session_end, session_start
 from qmx.store import Store, StoreSchemaMismatch
 from qmx.watch import watch
@@ -144,6 +149,7 @@ def _cmd_refresh(settings: Settings, args: argparse.Namespace) -> int:
             code = index_paths(roots, store, embedder, force=args.force)
             chats = backfill_chats(DEFAULT_PROJECTS_DIR, store, embedder, force=args.force)
             mem = index_memory(settings.memory_globs, store, embedder, force=args.force)
+            parked = sync_index(store, embedder, ParkedRepo(settings.parked_root))
     except (StoreSchemaMismatch, EmbedBackendError) as exc:
         print(f"refresh failed: {exc}", file=sys.stderr)
         return 1
@@ -151,7 +157,8 @@ def _cmd_refresh(settings: Settings, args: argparse.Namespace) -> int:
         f"code:   {code.files_indexed} files, {code.chunks_embedded} embedded "
         f"({len(roots)} root(s))\n"
         f"chats:  {chats.files_indexed} transcripts, {chats.chunks_embedded} turns embedded\n"
-        f"memory: {mem.files_indexed} files, {mem.chunks_embedded} embedded"
+        f"memory: {mem.files_indexed} files, {mem.chunks_embedded} embedded\n"
+        f"parked: {parked.indexed} indexed, {parked.removed} removed"
     )
     for err in (*code.errors, *chats.errors, *mem.errors):
         print(f"  ! {err}", file=sys.stderr)
@@ -564,6 +571,105 @@ def _cmd_consolidate(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+# -- parked items ----------------------------------------------------------------------------------
+
+
+def _fmt_parked(item: dict) -> str:
+    scope = item["scope"] or "global"
+    flags = " [stale]" if item.get("stale") else ""
+    if item["status"] != "open":
+        flags += f" [{item['status']}]"
+    line = f"#{item['id']:<4} {item['title']}{flags}\n      {scope} · parked {item['created'][:10]}"
+    if item.get("why"):
+        line += f"\n      {item['why'].splitlines()[0][:120]}"
+    if item.get("note"):
+        line += f"\n      -> {item['note'].splitlines()[0][:120]}"
+    return line
+
+
+def _default_scope(args: argparse.Namespace) -> str | None:
+    if getattr(args, "make_global", False):
+        return None
+    return args.scope or canonical_repo_key(Path.cwd())
+
+
+def _cmd_park(settings: Settings, args: argparse.Namespace) -> int:
+    try:
+        item = QmxService(settings).park(
+            " ".join(args.text), why=args.why, scope=_default_scope(args), session=args.session
+        )
+    except (StoreSchemaMismatch, ValueError) as exc:
+        print(f"park failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"parked #{item['id']} ({item['scope'] or 'global'}): {item['title']}")
+    if not item["indexed"]:
+        print("  (saved; not searchable until `qmx refresh` — model backend down)", file=sys.stderr)
+    for other in item.get("similar", []):
+        print(f"  similar: #{other['id']} {other['title']}")
+    return 0
+
+
+def _cmd_parked(settings: Settings, args: argparse.Namespace) -> int:
+    svc = QmxService(settings)
+    try:
+        if args.sync:
+            stats = svc.sync_parked()
+            print(f"parked index: {stats['indexed']} indexed, {stats['removed']} removed")
+            return 0
+        items = svc.list_parked(
+            scope=None if args.all else _default_scope(args),
+            all_scopes=args.all,
+            status="all" if args.archived else "open",
+            query=args.query,
+            stale_only=args.stale,
+            k=args.k,
+        )
+    except (StoreSchemaMismatch, EmbedBackendError, ValueError) as exc:
+        print(f"parked failed: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(items, indent=2))
+        return 0
+    if not items:
+        print("nothing parked" + (" (stale)" if args.stale else ""))
+        return 0
+    print("\n".join(_fmt_parked(i) for i in items))
+    if args.stale:
+        print("\nreview: `qmx keep <id>` (still relevant) or `qmx unpark <id> --drop`")
+    return 0
+
+
+def _cmd_unpark(settings: Settings, args: argparse.Namespace) -> int:
+    status = "dropped" if args.drop else "done"
+    try:
+        item = QmxService(settings).unpark(args.id, status=status, note=args.note)
+    except (ParkedNotFound, StoreSchemaMismatch, ValueError) as exc:
+        print(f"unpark failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"unparked #{item['id']} [{item['status']}]: {item['title']}")
+    return 0
+
+
+def _cmd_reopen(settings: Settings, args: argparse.Namespace) -> int:
+    try:
+        item = QmxService(settings).reopen_parked(args.id)
+    except (ParkedNotFound, StoreSchemaMismatch) as exc:
+        print(f"reopen failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"reopened #{item['id']}: {item['title']}")
+    return 0
+
+
+def _cmd_keep(settings: Settings, args: argparse.Namespace) -> int:
+    try:
+        item = QmxService(settings).keep_parked(args.id)
+    except (ParkedNotFound, ValueError) as exc:
+        print(f"keep failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"kept #{item['id']} (stale clock reset): {item['title']}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="qmx", description="Query Memory indeX")
     parser.add_argument("-v", "--verbose", action="store_true", help="log indexing detail")
@@ -685,6 +791,34 @@ def build_parser() -> argparse.ArgumentParser:
     p_prom = sub.add_parser("promote", help="graduate a lesson to per-repo curated memory")
     p_prom.add_argument("id", type=int, help="learning id (from `qmx lessons --review`)")
 
+    p_park = sub.add_parser("park", help="park an idea to come back to later")
+    p_park.add_argument("text", nargs="+", help="the idea, one line")
+    p_park.add_argument("--why", default=None, help="context needed to pick it up cold")
+    p_park.add_argument("--scope", default=None, help="repo key (default: the current repo)")
+    p_park.add_argument("--global", dest="make_global", action="store_true", help="no repo scope")
+    p_park.add_argument("--session", default=None, help="transcript it came from (optional)")
+
+    p_parked = sub.add_parser("parked", help="list parked items (current repo + global)")
+    p_parked.add_argument("query", nargs="?", default=None, help="rank by meaning (optional)")
+    p_parked.add_argument("--all", action="store_true", help="every scope, not just this repo")
+    p_parked.add_argument("--scope", default=None, help="repo key (default: the current repo)")
+    p_parked.add_argument("--archived", action="store_true", help="include done/dropped items")
+    p_parked.add_argument("--stale", action="store_true", help="only items due a keep/drop review")
+    p_parked.add_argument("--sync", action="store_true", help="rebuild the parked search index")
+    p_parked.add_argument("--json", action="store_true", help="emit JSON instead of text")
+    p_parked.add_argument("-k", type=int, default=50, help="max items (default 50)")
+
+    p_unpark = sub.add_parser("unpark", help="close a parked item (archived, not deleted)")
+    p_unpark.add_argument("id", type=int, help="parked item id")
+    p_unpark.add_argument("--drop", action="store_true", help="abandoned rather than done")
+    p_unpark.add_argument("--note", default=None, help="resolution: what was done / why dropped")
+
+    p_reopen = sub.add_parser("reopen", help="reopen a closed parked item")
+    p_reopen.add_argument("id", type=int, help="parked item id")
+
+    p_keep = sub.add_parser("keep", help="stale review: mark a parked item still relevant")
+    p_keep.add_argument("id", type=int, help="parked item id")
+
     p_watch = sub.add_parser("watch", help="watch path(s) (or code_roots) and keep the index live")
     p_watch.add_argument(
         "paths", nargs="*", help="files/directories to watch (default: config code_roots)"
@@ -725,6 +859,11 @@ _COMMANDS = {
     "lessons": _cmd_lessons,
     "promote": _cmd_promote,
     "consolidate": _cmd_consolidate,
+    "park": _cmd_park,
+    "parked": _cmd_parked,
+    "unpark": _cmd_unpark,
+    "reopen": _cmd_reopen,
+    "keep": _cmd_keep,
     "watch": _cmd_watch,
     "sources": _cmd_sources,
     "remove": _cmd_remove,

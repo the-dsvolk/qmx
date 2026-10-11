@@ -34,6 +34,8 @@ _ENV_MAP = {
     "QMX_MEMORY_GLOBS": "memory_globs",
     "QMX_CODE_ROOTS": "code_roots",
     "QMX_PROMOTED_MEMORY_ROOT": "promoted_memory_root",
+    "QMX_PARKED_ROOT": "parked_root",
+    "QMX_PARKED_STALE_DAYS": "parked_stale_days",
 }
 
 # Where Claude memory lives. Globs (``~`` expanded) matching memory dirs or .md files; a dir match
@@ -85,6 +87,12 @@ class Settings:
     # key: ``<root>/<owner>__<repo>/``, ``<root>/_global/``). See ``plan/qmx-learnings.md``.
     promoted_memory_root: str = "~/.qmx/memory"
 
+    # Parked items ("park this, come back later") — one markdown file each, the source of truth;
+    # closed ones move to ``<root>/archive/``. Open items untouched for ``parked_stale_days`` are
+    # flagged for a keep-or-drop review (never auto-archived). See ``plan/qmx-parked.md``.
+    parked_root: str = "~/.qmx/parked"
+    parked_stale_days: int = 30
+
     @classmethod
     def load(cls, config_path: Path | None = None, env: dict[str, str] | None = None) -> Settings:
         """Build settings from defaults, an optional TOML file, then ``QMX_*`` env vars."""
@@ -127,7 +135,7 @@ def _coerce_value(name: str, raw: object) -> object:
     if name in {"memory_globs", "code_roots"}:
         items = raw.split(",") if isinstance(raw, str) else list(raw)
         return tuple(s.strip() for s in items if str(s).strip())
-    if name in {"embed_dim", "embed_batch_size", "max_retries", "mcp_port"}:
+    if name in {"embed_dim", "embed_batch_size", "max_retries", "mcp_port", "parked_stale_days"}:
         return int(raw)
     if name in {"request_timeout", "retry_base_delay"}:
         return float(raw)

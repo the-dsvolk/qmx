@@ -1,7 +1,8 @@
 """Resident MCP server — the primary way Claude Code talks to qmx.
 
 Exposes the tools ``query`` / ``search_code`` / ``recall`` / ``lessons`` / ``add_learning`` /
-``update_learning`` / ``deprecate_learning`` / ``restore_learning`` / ``get`` / ``status`` as
+``update_learning`` / ``deprecate_learning`` / ``restore_learning`` / ``park`` / ``list_parked`` /
+``unpark`` / ``resume_parked`` / ``get`` / ``status`` as
 ``mcp__qmx__*`` over an HTTP endpoint, so one server on the Spark serves every Claude Code instance
 on the LAN (``plan/qmx-deployment.md``). Chat capture is a separate write path (the ``qmx capture``
 Stop hook).
@@ -131,6 +132,67 @@ def build_server(settings: Settings, service: QmxService | None = None) -> FastM
     def restore_learning(learning_id: int) -> dict | None:
         """Un-retire a lesson deprecated by mistake — clears the retire/supersede markers."""
         return svc.restore_learning(learning_id)
+
+    @server.tool()
+    def park(
+        text: str,
+        why: str | None = None,
+        cwd: str | None = None,
+        scope: str | None = None,
+        session: str | None = None,
+    ) -> dict:
+        """Park an idea to come back to later — when the user says "park this", "remind me later",
+        "let's come back to that", or mid-task surfaces a side idea not worth derailing for.
+
+        ``text`` is the idea in one line; ``why`` the context needed to pick it up cold (what
+        prompted it, what to check). Pass ``cwd`` (your working directory) so the item is scoped
+        to that repo, or ``scope`` (``owner/repo``) directly; omit both for a global item.
+        ``session`` optionally records the transcript it came from. Returns the stored item;
+        ``similar`` lists open items that look alike (mention them — it may be a duplicate).
+        """
+        return svc.park(text, why=why, scope=scope, cwd=cwd, session=session)
+
+    @server.tool()
+    def list_parked(
+        cwd: str | None = None,
+        scope: str | None = None,
+        all_scopes: bool = False,
+        status: str = "open",
+        query: str | None = None,
+        stale_only: bool = False,
+        k: int = 20,
+    ) -> list[dict]:
+        """List parked items — only call when the user asks ("what did I park?", "parked items").
+
+        Scoped to ``cwd``'s repo (or ``scope``) plus global items; with neither, every scope.
+        ``status``: ``open`` (default) | ``done`` | ``dropped`` | ``closed`` | ``all``. ``query``
+        ranks by meaning. ``stale_only`` keeps items untouched long enough to need a keep-or-drop
+        review (each item also carries a ``stale`` flag).
+        """
+        return svc.list_parked(
+            scope=scope,
+            cwd=cwd,
+            all_scopes=all_scopes,
+            status=status,
+            query=query,
+            stale_only=stale_only,
+            k=k,
+        )
+
+    @server.tool()
+    def unpark(item_id: int, status: str = "done", note: str | None = None) -> dict:
+        """Close a parked item once the work is done (``done``) or abandoned (``dropped``).
+
+        ``note`` records the resolution (what was done, or why it was dropped). The item is
+        archived, not deleted — ``qmx reopen <id>`` brings it back.
+        """
+        return svc.unpark(item_id, status=status, note=note)
+
+    @server.tool()
+    def resume_parked(item_id: int, k: int = 3) -> dict:
+        """Pick a parked item back up: the item plus the past chat turns that best match it,
+        so the original context is restored, not just the one-line note."""
+        return svc.resume_parked(item_id, k=k)
 
     @server.tool()
     def get(chunk_id: int) -> dict | None:
