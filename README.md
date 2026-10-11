@@ -246,6 +246,27 @@ session. Promoted lessons live in an **isolated per-repo store** (`~/.qmx/memory
 sweep: see step 8 of [`QUICKSTART.md`](./QUICKSTART.md), which points at [`INFRA.md`](./INFRA.md) for
 the running services (the Spark model + the launchd agents).
 
+## Parked items ("park this, come back later")
+
+Mid-chat ideas you want to set aside without derailing the current task. Tell Claude *"park this"*
+(→ `mcp__qmx__park`) or use the CLI; each item is a markdown file under `~/.qmx/parked/`, scoped to
+the current repo (or global). Items are surfaced **only when you ask** — there is no session-start
+nudge.
+
+```bash
+qmx park "auto-suggest closing items from commits" --why "Stop hook could match commits"
+qmx park --global "try qwen3-embedding 4b"
+qmx parked                    # open items for this repo + global   (--all: every repo)
+qmx parked "embedding"        # rank by meaning
+qmx unpark 3 --note "landed in #30"     # done -> archived, never deleted (--drop: abandoned)
+qmx reopen 3
+qmx parked --stale            # untouched > 30 days: `qmx keep <id>` or `qmx unpark <id> --drop`
+```
+
+The files are the source of truth; open items are also embedded (`kind=parked`) for semantic
+listing and a "similar item" hint on park. Parking works with the Spark off — `qmx refresh` (or
+`qmx parked --sync`) indexes anything saved meanwhile. Design: [`plan/qmx-parked.md`](./plan/qmx-parked.md).
+
 ## Status
 
 Capabilities #1–#3 implemented: code search, chat recall, and the **learnings/consolidation** tier
@@ -307,7 +328,9 @@ claude mcp add --transport http qmx http://spark-0e81.local:8765/mcp
 
 The tools then appear as `mcp__qmx__query`, `mcp__qmx__search_code`, `mcp__qmx__recall`,
 `mcp__qmx__lessons`, `mcp__qmx__add_learning`, `mcp__qmx__update_learning`,
-`mcp__qmx__deprecate_learning`, `mcp__qmx__restore_learning`, `mcp__qmx__get`, `mcp__qmx__status`.
+`mcp__qmx__deprecate_learning`, `mcp__qmx__restore_learning`, `mcp__qmx__park`,
+`mcp__qmx__list_parked`, `mcp__qmx__unpark`, `mcp__qmx__resume_parked`, `mcp__qmx__get`,
+`mcp__qmx__status`.
 (`qmx serve --transport stdio` is available for a local, single-client setup.)
 
 ## License
