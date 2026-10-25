@@ -1,6 +1,7 @@
 """Resident MCP server — the primary way Claude Code talks to qmx.
 
-Exposes the tools ``query`` / ``search_code`` / ``recall`` / ``lessons`` / ``add_learning`` /
+Exposes the tools ``query`` / ``search_code`` / ``recall`` / ``meetings`` / ``lessons`` /
+``add_learning`` /
 ``update_learning`` / ``deprecate_learning`` / ``restore_learning`` / ``park`` / ``list_parked`` /
 ``unpark`` / ``resume_parked`` / ``get`` / ``status`` as
 ``mcp__qmx__*`` over an HTTP endpoint, so one server on the Spark serves every Claude Code instance
@@ -31,7 +32,8 @@ def build_server(settings: Settings, service: QmxService | None = None) -> FastM
         """Semantic + keyword search over the qmx knowledge base (code, docs, chats, learnings).
 
         Returns ranked hits with ``path``, ``start_line``/``end_line``, ``symbol``, ``score`` and a
-        text snippet. Optional ``kind`` filters to ``code`` | ``doc`` | ``chat`` | ``learning``.
+        text snippet. Optional ``kind`` filters to ``code`` | ``doc`` | ``chat`` | ``learning`` |
+        ``meeting``.
         """
         return svc.query(text, k=k, kind=kind)
 
@@ -47,6 +49,16 @@ def build_server(settings: Settings, service: QmxService | None = None) -> FastM
         Returns matching turns with their transcript path, line, and role (user/assistant).
         """
         return svc.recall(text, k=k)
+
+    @server.tool()
+    def meetings(text: str, k: int = 5) -> list[dict]:
+        """Search recorded meetings (Memoir calls) — transcripts, summaries, notes and prep.
+
+        Each hit names its call: ``meeting`` (folder ``YYYY-MM-DD_<name>``), ``date``, ``file``
+        (``transcript.txt`` | ``summary.md`` | ``notes.md`` | ``prep.md``), plus ``symbol``
+        (transcript speakers + time range, or the summary section) and the snippet.
+        """
+        return svc.meetings(text, k=k)
 
     @server.tool()
     def lessons(

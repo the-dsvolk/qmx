@@ -12,6 +12,9 @@ Reads survive a missing embedding backend: the embedder is wrapped in a
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 from qmx.config import Settings
 from qmx.embed import (
     CircuitBreakerEmbedder,
@@ -55,6 +58,8 @@ DEGRADED_NOTE = "bm25-only: embedding backend unreachable, results are keyword-m
 PARKED_SIMILAR_MAX_DISTANCE = 0.3
 PARKED_LIST_STATUSES = ("open", "done", "dropped", "closed", "all")
 
+_MEETING_FOLDER_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}_")
+
 
 class QmxService:
     """Operations backing the MCP tools: ``query`` / ``recall`` / ``lessons`` / ``get`` / ``status``
@@ -93,6 +98,15 @@ class QmxService:
         with self._store() as store:
             results = search(store, self._embedder, text, k=k, kind="chat", reranker=self._reranker)
             return self._mark([_hit_dict(r.hit, score=r.score) for r in results])
+
+    def meetings(self, text: str, k: int = 5) -> list[dict]:
+        """Search **meetings** only (``kind='meeting'``) — Memoir call transcripts, summaries,
+        notes and prep. Each hit also names its call (``meeting`` folder, ``date``) and ``file``."""
+        with self._store() as store:
+            results = search(
+                store, self._embedder, text, k=k, kind="meeting", reranker=self._reranker
+            )
+            return self._mark([_meeting_hit_dict(r.hit, score=r.score) for r in results])
 
     def lessons(
         self,
@@ -360,4 +374,15 @@ def _hit_dict(hit: SearchHit, *, score: float | None, full: bool = False) -> dic
     }
     if score is not None:
         out["score"] = round(score, 6)
+    return out
+
+
+def _meeting_hit_dict(hit: SearchHit, *, score: float | None) -> dict:
+    """A meeting hit, plus the call it belongs to: folder ``YYYY-MM-DD_<name>`` → date + file."""
+    out = _hit_dict(hit, score=score)
+    path = Path(hit.path) if hit.path else None
+    folder = path.parent.name if path else ""
+    out["meeting"] = folder
+    out["date"] = folder[:10] if _MEETING_FOLDER_DATE.match(folder) else None
+    out["file"] = path.name if path else None
     return out
