@@ -48,6 +48,20 @@ def _payload_cwd(payload: dict) -> str:
     return os.environ.get("CURSOR_PROJECT_DIR") or str(Path.cwd())
 
 
+def is_capture_excluded(payload: dict, settings: Settings) -> bool:
+    """Whether the payload's workspace folder is (inside) one of ``capture_exclude_roots``.
+
+    Paths are resolved first: Cursor reports symlink-resolved roots (``/tmp`` → ``/private/tmp``).
+    """
+    if not settings.capture_exclude_roots:
+        return False
+    cwd = Path(_payload_cwd(payload)).expanduser().resolve()
+    return any(
+        cwd.is_relative_to(Path(root).expanduser().resolve())
+        for root in settings.capture_exclude_roots
+    )
+
+
 def build_injection(
     store: Store, scope: str | None, *, char_budget: int = INJECT_CHAR_BUDGET
 ) -> str:
@@ -90,7 +104,7 @@ def session_end(stdin_text: str, settings: Settings) -> bool:
     try:
         payload = json.loads(stdin_text) if stdin_text.strip() else {}
         transcript = payload.get("transcript_path") or os.environ.get("CURSOR_TRANSCRIPT_PATH")
-        if not transcript:
+        if not transcript or is_capture_excluded(payload, settings):
             return False
         scope = canonical_repo_key(_payload_cwd(payload))
         cmd = [sys.executable, "-m", "qmx.cli", "consolidate", "--session", transcript]

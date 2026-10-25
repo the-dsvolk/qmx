@@ -33,6 +33,7 @@ _ENV_MAP = {
     "QMX_RETRY_BASE_DELAY": "retry_base_delay",
     "QMX_MEMORY_GLOBS": "memory_globs",
     "QMX_CODE_ROOTS": "code_roots",
+    "QMX_CAPTURE_EXCLUDE_ROOTS": "capture_exclude_roots",
     "QMX_PROMOTED_MEMORY_ROOT": "promoted_memory_root",
     "QMX_PARKED_ROOT": "parked_root",
     "QMX_PARKED_STALE_DAYS": "parked_stale_days",
@@ -83,6 +84,10 @@ class Settings:
     # Code repos to keep indexed (kind="code"), swept by ``qmx refresh``. Same list format.
     code_roots: tuple[str, ...] = ()
 
+    # Workspaces whose agent sessions the capture/session-end hooks ignore (``~`` expanded; a
+    # session is skipped when its workspace folder is one of these or inside one). Same list format.
+    capture_exclude_roots: tuple[str, ...] = ()
+
     # Root of the per-repo curated-memory store that ``qmx promote`` writes to (isolated by repo
     # key: ``<root>/<owner>__<repo>/``, ``<root>/_global/``). See ``plan/qmx-learnings.md``.
     promoted_memory_root: str = "~/.qmx/memory"
@@ -126,13 +131,14 @@ class Settings:
         d["db_path"] = str(self.db_path)
         d["memory_globs"] = list(self.memory_globs)
         d["code_roots"] = list(self.code_roots)
+        d["capture_exclude_roots"] = list(self.capture_exclude_roots)
         return d
 
 
 def _coerce_value(name: str, raw: object) -> object:
     if name == "db_path":
         return Path(raw).expanduser() if not isinstance(raw, Path) else raw
-    if name in {"memory_globs", "code_roots"}:
+    if name in {"memory_globs", "code_roots", "capture_exclude_roots"}:
         items = raw.split(",") if isinstance(raw, str) else list(raw)
         return tuple(s.strip() for s in items if str(s).strip())
     if name in {"embed_dim", "embed_batch_size", "max_retries", "mcp_port", "parked_stale_days"}:
