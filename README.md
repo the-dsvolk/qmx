@@ -182,6 +182,25 @@ flowchart LR
 
 See [plan/qmx-ml-notes.md](./plan/qmx-ml-notes.md) (TD-1) for how the reranker is built and served.
 
+## Meetings (Memoir calls)
+
+qmx also indexes [Memoir](https://github.com/the-dsvolk/memoir) call folders
+(`~/memoir/YYYY-MM-DD_<name>/`) as `kind=meeting`. Each of `transcript.txt`, `summary.md`,
+`notes.md` and `prep.md` is its own document, with `repo` set to the call folder. The transcript is
+chunked into ~60–90 s windows (breaking only between lines, one-line overlap) that cite their
+`transcript.txt` line range, with speakers and time range as the `symbol`. Every chunk starts with
+`name · date start · attendees` (attendees from an `Attendees:` line in `prep.md`). Meetings are
+searchable only — they are never distilled into lessons.
+
+```bash
+qmx index-meeting ~/memoir/2026-10-22_sim-t4-migration   # one call (Memoir's after-the-call step)
+qmx backfill-meetings                                    # every call under ~/memoir
+qmx query --kind meeting "T4 deprecation options"        # or the `meetings` MCP tool
+```
+
+A call still in progress (no `ended_at` in `meeting.json`) is skipped. Renamed or deleted call
+folders are not tracked automatically.
+
 ## Learnings (distilled lessons)
 
 Beyond raw recall, qmx distils past chats into a **learnings** tier (`kind=learning`) — reusable

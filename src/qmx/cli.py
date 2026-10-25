@@ -1,7 +1,8 @@
 """qmx CLI — thin admin surface over the store/embed/index/search layers.
 
 Ships ``status`` / ``index`` / ``query`` / ``watch`` / ``sources`` / ``remove`` / ``gc`` /
-``serve``, plus ``backfill-chats`` and ``capture`` (chat memory) per ``plan/qmx-plan.md``, and the
+``serve``, plus ``backfill-chats`` and ``capture`` (chat memory) per ``plan/qmx-plan.md``,
+``index-meeting`` / ``backfill-meetings`` (Memoir call folders, ``kind=meeting``), and the
 parked-items verbs ``park`` / ``parked`` / ``unpark`` / ``reopen`` / ``keep``
 (``plan/qmx-parked.md``).
 """
@@ -25,7 +26,15 @@ from qmx.embed import (
     ping_ollama,
     read_embedder,
 )
-from qmx.index import backfill_chats, index_memory, index_paths, index_transcript
+from qmx.index import (
+    backfill_chats,
+    backfill_meetings,
+    index_meeting,
+    index_memory,
+    index_paths,
+    index_transcript,
+    is_meeting_folder,
+)
 from qmx.learnings import (
     add_learning,
     deprecate_learning,
@@ -46,6 +55,7 @@ from qmx.store import Store, StoreSchemaMismatch
 from qmx.watch import watch
 
 DEFAULT_PROJECTS_DIR = Path.home() / ".claude" / "projects"
+DEFAULT_MEETINGS_DIR = "~/memoir"  # Memoir's default save folder
 
 
 def _open_store(settings: Settings) -> Store:
@@ -115,6 +125,46 @@ def _cmd_backfill_chats(settings: Settings, args: argparse.Namespace) -> int:
     )
     for err in stats.errors:
         print(f"  ! {err}", file=sys.stderr)
+    return 0
+
+
+def _print_meeting_stats(stats) -> None:
+    print(
+        f"indexed {stats.files_indexed} meeting file(s): {stats.chunks_embedded} embedded, "
+        f"{stats.chunks_reused} reused; removed {stats.files_removed}; "
+        f"skipped {stats.files_skipped}, scanned {stats.files_scanned}"
+    )
+    for err in stats.errors:
+        print(f"  ! {err}", file=sys.stderr)
+
+
+def _cmd_index_meeting(settings: Settings, args: argparse.Namespace) -> int:
+    folder = Path(args.folder).expanduser()
+    if not is_meeting_folder(folder):
+        print(f"not a Memoir call folder (no meeting.json): {folder}", file=sys.stderr)
+        return 2
+    try:
+        with _open_store(settings) as store, OllamaEmbedder(settings) as embedder:
+            stats = index_meeting(folder, store, embedder, force=args.force)
+    except (StoreSchemaMismatch, EmbedBackendError) as exc:
+        print(f"index-meeting failed: {exc}", file=sys.stderr)
+        return 1
+    _print_meeting_stats(stats)
+    return 0
+
+
+def _cmd_backfill_meetings(settings: Settings, args: argparse.Namespace) -> int:
+    save_dir = Path(args.save_dir).expanduser()
+    if not save_dir.is_dir():
+        print(f"no such directory: {save_dir}", file=sys.stderr)
+        return 2
+    try:
+        with _open_store(settings) as store, OllamaEmbedder(settings) as embedder:
+            stats = backfill_meetings(save_dir, store, embedder, force=args.force)
+    except (StoreSchemaMismatch, EmbedBackendError) as exc:
+        print(f"backfill-meetings failed: {exc}", file=sys.stderr)
+        return 1
+    _print_meeting_stats(stats)
     return 0
 
 
@@ -693,6 +743,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="transcript schema to parse (default: claude)",
     )
 
+    p_im = sub.add_parser("index-meeting", help="index one Memoir call folder (kind=meeting)")
+    p_im.add_argument("folder", help="the call folder (YYYY-MM-DD_<name>/ with meeting.json)")
+    p_im.add_argument("--force", action="store_true", help="re-index unchanged files too")
+
+    p_bm = sub.add_parser(
+        "backfill-meetings", help="index every Memoir call folder under a save folder"
+    )
+    p_bm.add_argument(
+        "save_dir", nargs="?", default=DEFAULT_MEETINGS_DIR, help="default ~/memoir"
+    )
+    p_bm.add_argument("--force", action="store_true", help="re-index unchanged files too")
+
     p_cap = sub.add_parser(
         "capture", help="Stop-hook entrypoint: index the transcript named on stdin"
     )
@@ -717,7 +779,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_query = sub.add_parser("query", help="hybrid (vector + BM25) search")
     p_query.add_argument("text", help="the query text")
     p_query.add_argument("-k", type=int, default=5, help="number of results (default 5)")
-    p_query.add_argument("--kind", default=None, help="filter by kind (code|doc|chat|learning)")
+    p_query.add_argument(
+        "--kind", default=None, help="filter by kind (code|doc|chat|learning|meeting)"
+    )
 
     p_add = sub.add_parser("add-learning", help="record a distilled lesson (kind=learning)")
     p_add.add_argument("statement", help="the lesson, one crisp sentence")
@@ -845,6 +909,8 @@ _COMMANDS = {
     "status": _cmd_status,
     "index": _cmd_index,
     "backfill-chats": _cmd_backfill_chats,
+    "index-meeting": _cmd_index_meeting,
+    "backfill-meetings": _cmd_backfill_meetings,
     "capture": _cmd_capture,
     "session-start": _cmd_session_start,
     "session-end": _cmd_session_end,

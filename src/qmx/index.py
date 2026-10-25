@@ -15,6 +15,7 @@ Phase 2 robustness core (``plan/qmx-plan.md``):
 from __future__ import annotations
 
 import glob
+import json
 import logging
 import os
 from collections.abc import Iterable, Iterator, Sequence
@@ -24,6 +25,7 @@ from pathlib import Path
 from qmx.chunk.chat import ChatSource, chunk_chat
 from qmx.chunk.code import chunk_code, language_for_path
 from qmx.chunk.doc import chunk_markdown
+from qmx.chunk.meeting import chunk_meeting_markdown, chunk_transcript, read_meeting_info
 from qmx.embed import Embedder
 from qmx.store import Chunk, ReindexResult, Store, hash_text
 
@@ -252,6 +254,118 @@ def _ingest_transcript(
         path=path_key,
         repo=path.parent.name,
         mtime=path.stat().st_mtime,
+    )
+    result = store.reindex_document(doc_id, chunks, new_embeddings)
+    store.set_document_hash(doc_id, file_hash)
+
+    stats.files_indexed += 1
+    stats.chunks_added += result.mentions
+    stats.chunks_embedded += result.embedded
+    stats.chunks_reused += result.reused
+    stats.chunks_orphaned += result.orphaned
+
+
+# -- meetings (kind="meeting") -----------------------------------------------------------------
+
+# The files of a Memoir call folder that are indexed, each as its own document.
+MEETING_FILES = ("transcript.txt", "summary.md", "notes.md", "prep.md")
+
+
+def is_meeting_folder(path: Path) -> bool:
+    """A Memoir call folder: a directory with a ``meeting.json``."""
+    return Path(path).is_dir() and (Path(path) / "meeting.json").is_file()
+
+
+def meeting_in_progress(folder: Path) -> bool:
+    """Memoir stamps ``ended_at`` in ``meeting.json`` when the call stops; until then it is live."""
+    try:
+        meta = json.loads((Path(folder) / "meeting.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return not meta.get("ended_at")
+
+
+def index_meeting(
+    folder: Path, store: Store, embedder: Embedder, *, force: bool = False
+) -> IndexStats:
+    """Index one Memoir call folder as ``kind='meeting'`` documents, ``repo`` = the folder name.
+
+    Each of :data:`MEETING_FILES` that exists becomes a document; files that disappeared from the
+    folder are dropped from the index. A call still in progress (no ``ended_at``) is skipped.
+    """
+    stats = IndexStats()
+    folder = Path(folder).resolve()
+    if meeting_in_progress(folder):
+        stats.files_skipped += 1
+        log.info("skip %s: call still in progress", folder)
+        return stats
+
+    header = read_meeting_info(folder).header()
+    seen: set[str] = set()
+    for name in MEETING_FILES:
+        path = folder / name
+        if not path.is_file():
+            continue
+        stats.files_scanned += 1
+        seen.add(str(path))
+        _ingest_meeting_file(path, folder.name, header, store, embedder, force, stats)
+
+    for doc_id, path in store.documents_under("meeting", str(folder) + os.sep):
+        if path not in seen:
+            stats.chunks_orphaned += store.remove_document_by_id(doc_id)
+            stats.files_removed += 1
+    return stats
+
+
+def backfill_meetings(
+    save_dir: Path, store: Store, embedder: Embedder, *, force: bool = False
+) -> IndexStats:
+    """Index every call folder directly under Memoir's save folder (e.g. ``~/memoir``)."""
+    stats = IndexStats()
+    for folder in sorted(p for p in Path(save_dir).expanduser().iterdir() if is_meeting_folder(p)):
+        try:
+            one = index_meeting(folder, store, embedder, force=force)
+        except OSError as exc:
+            stats.errors.append(f"{folder}: {exc}")
+            log.warning("skip %s: %s", folder, exc)
+            continue
+        stats.files_scanned += one.files_scanned
+        stats.files_indexed += one.files_indexed
+        stats.files_skipped += one.files_skipped
+        stats.files_removed += one.files_removed
+        stats.chunks_added += one.chunks_added
+        stats.chunks_embedded += one.chunks_embedded
+        stats.chunks_reused += one.chunks_reused
+        stats.chunks_orphaned += one.chunks_orphaned
+        stats.errors.extend(one.errors)
+    return stats
+
+
+def _ingest_meeting_file(
+    path: Path,
+    repo: str,
+    header: str,
+    store: Store,
+    embedder: Embedder,
+    force: bool,
+    stats: IndexStats,
+) -> None:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    path_key = str(path)
+    # The header is part of every chunk, so a rename or new attendees must re-index the file too.
+    file_hash = hash_text(f"{header}\n{text}")
+    if not force and store.document_hash("meeting", path_key) == file_hash:
+        stats.files_skipped += 1
+        return
+
+    if path.name == "transcript.txt":
+        chunks = chunk_transcript(text, header)
+    else:
+        chunks = chunk_meeting_markdown(text, header)
+    new_embeddings = embed_missing(store, embedder, chunks)  # embed before any DB write
+    # file_hash last (after chunks land) so an interrupted write is re-processed, not skipped.
+    doc_id = store.upsert_document(
+        kind="meeting", path=path_key, repo=repo, mtime=path.stat().st_mtime
     )
     result = store.reindex_document(doc_id, chunks, new_embeddings)
     store.set_document_hash(doc_id, file_hash)
