@@ -22,6 +22,7 @@ from qmx.chunk.chat import ChatSource
 from qmx.config import Settings
 from qmx.embed import interactive_embedder
 from qmx.index import index_memory_dir, index_transcript
+from qmx.session import is_capture_excluded
 from qmx.store import Store
 
 log = logging.getLogger("qmx.capture")
@@ -37,6 +38,9 @@ def capture(stdin_text: str, settings: Settings, source: ChatSource = "claude") 
         payload = json.loads(stdin_text) if stdin_text.strip() else {}
         transcript_path = payload.get("transcript_path")
         if not transcript_path:
+            return 0
+        if is_capture_excluded(payload, settings):
+            log.info("capture skipped: %s is under capture_exclude_roots", transcript_path)
             return 0
         with (
             Store.open(settings.db_path, settings.embed_dim, settings.embed_model) as store,

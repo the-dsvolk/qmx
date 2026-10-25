@@ -242,6 +242,15 @@ Injection is **scope-keyed** (the current repo, resolved from `cwd` via `git rem
 budgeted to the 10k-char `additionalContext` cap — so one repo's lessons never leak into another's
 session. Promoted lessons live in an **isolated per-repo store** (`~/.qmx/memory/<owner__repo>/`).
 
+**Excluding automated sessions** — agents that run headless in a known folder (e.g. Memoir's
+after-the-call Summary agent, which runs in `~/memoir/<call>/`) still fire the user's hooks. List
+those folders in `~/.qmx/config.toml` and `qmx capture` / `qmx session-end` ignore any session whose
+workspace folder is inside one (env override: `QMX_CAPTURE_EXCLUDE_ROOTS`, comma-separated):
+
+```toml
+capture_exclude_roots = ["~/memoir"]
+```
+
 **Setting it up** — pull the chat model, wire the hooks, and (optionally) schedule the nightly
 sweep: see step 8 of [`QUICKSTART.md`](./QUICKSTART.md), which points at [`INFRA.md`](./INFRA.md) for
 the running services (the Spark model + the launchd agents).
