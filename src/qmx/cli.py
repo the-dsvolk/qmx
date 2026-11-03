@@ -638,15 +638,21 @@ def _cmd_consolidate(settings: Settings, args: argparse.Namespace) -> int:
                 targets = [doc_id for doc_id, _ in store.list_documents("chat")]
 
             created = updated = superseded = candidates = 0
-            deprecated = dropped = blocked = 0
+            deprecated = dropped = blocked = passes = skipped = 0
             for doc_id in targets:
-                res = consolidate_session(store, embedder, chat, doc_id, scope=args.scope)
+                res = consolidate_session(
+                    store, embedder, chat, doc_id, scope=args.scope,
+                    min_turns=settings.consolidate_min_turns,
+                    min_chars=settings.consolidate_min_chars,
+                )
                 created += res.created
                 updated += res.updated
                 superseded += res.superseded
                 deprecated += res.deprecated
                 dropped += res.dropped
                 blocked += res.update_blocked
+                passes += res.passes
+                skipped += res.skipped_small
                 candidates += res.candidates
     except (StoreSchemaMismatch, EmbedBackendError, ChatBackendError) as exc:
         print(f"consolidate failed: {exc}", file=sys.stderr)
@@ -662,6 +668,10 @@ def _cmd_consolidate(settings: Settings, args: argparse.Namespace) -> int:
     if blocked:
         print(f"  ({blocked} update(s) blocked by the merge guardrail — stored as new instead; "
               "-v for which)")
+    if passes > len(targets) - skipped:
+        print(f"  ({passes} extract passes: long sessions were read in several windows)")
+    if skipped:
+        print(f"  ({skipped} session(s) below the one-off gate — left for later)")
     return 0
 
 

@@ -15,6 +15,8 @@ def test_defaults():
     assert s.chat_num_ctx == 65536
     assert s.chat_timeout == 300.0
     assert s.request_timeout == 60.0  # embeds/hooks keep the short timeout
+    assert s.chat_think == "false"
+    assert (s.consolidate_min_turns, s.consolidate_min_chars) == (8, 4000)
 
 
 def test_judge_settings_from_env():

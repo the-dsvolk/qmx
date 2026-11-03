@@ -77,7 +77,12 @@ class FakeChat:
             return {"learnings": learnings}
         if "audit" in system:  # PRESERVE_SYSTEM (merge guardrail)
             self.check_prompts.append(user)
-            return self._checks.pop(0) if self._checks else {"preserves": True, "lost": ""}
+            if self._checks:
+                return self._checks.pop(0)
+            # Default: the merge preserves the target, quoting NEW's first line as evidence.
+            new = user.split("NEW:\n", 1)[1].split("\n", 1)[0] if "NEW:\n" in user else ""
+            return {"preserves": True, "evidence_in_new": new, "unsupported_additions": [],
+                    "lost": ""}
         self.decision_prompts.append(user)
         return self._decisions.pop(0) if self._decisions else {"action": "new"}
 

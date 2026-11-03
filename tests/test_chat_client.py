@@ -42,3 +42,10 @@ def test_judge_uses_chat_timeout_not_request_timeout():
     # what the slow, detached judge waits on (and vice versa).
     with OllamaChat(Settings(chat_timeout=300.0, request_timeout=60.0)) as chat:
         assert chat._client.timeout.read == 300.0  # noqa: SLF001
+
+
+def test_think_follows_chat_think_setting():
+    for raw, expected in (("false", False), ("medium", "medium"), ("true", True), ("", False)):
+        captured: list[dict] = []
+        OllamaChat(Settings(chat_think=raw), client=_client(captured)).complete_json("s", "u")
+        assert captured[0]["think"] == expected, raw

@@ -39,6 +39,7 @@ class OllamaChat:
     def __init__(self, settings: Settings, client: httpx.Client | None = None) -> None:
         self._model = settings.chat_model
         self._num_ctx = settings.chat_num_ctx
+        self._think = _think_value(settings.chat_think)
         self._max_retries = settings.max_retries
         self._base_delay = settings.retry_base_delay
         self._owns_client = client is None
@@ -55,7 +56,7 @@ class OllamaChat:
                 {"role": "user", "content": user},
             ],
             "stream": False,
-            "think": False,  # no thinking tokens — we want the JSON object directly
+            "think": self._think,  # Settings.chat_think (default off)
             "format": schema if schema is not None else "json",
             "options": self._options(),
         }
@@ -92,6 +93,16 @@ class OllamaChat:
 
     def __exit__(self, *exc: object) -> None:
         self.close()
+
+
+def _think_value(raw: str) -> bool | str:
+    """Map ``chat_think`` to Ollama's ``think``: False / True / an effort-level string."""
+    v = (raw or "").strip().lower()
+    if v in ("", "false", "off", "no", "0"):
+        return False
+    if v in ("true", "on", "yes", "1"):
+        return True
+    return v
 
 
 def _parse_json_object(content: str) -> dict:

@@ -139,10 +139,13 @@ def test_update_that_loses_the_targets_claim_is_blocked(store, tmp_path):
     [prompt] = chat.check_prompts
     assert "OLD:\nTrack wash-sale freezes" in prompt
     assert "NEW:\nSeparate lots and trades" in prompt
+    assert "CANDIDATE:\nStore lots and trades in separate tables" in prompt
 
 
 def test_update_that_preserves_the_target_is_applied_and_revisioned(store, tmp_path):
-    s, target, _, res = _update_case(store, tmp_path, [{"preserves": True, "lost": ""}])
+    s, target, _, res = _update_case(store, tmp_path, [{
+        "preserves": True, "evidence_in_new": "separate LOTS and trades into distinct tables",
+        "unsupported_additions": [], "lost": ""}])
     assert (res.updated, res.update_blocked, res.created) == (1, 0, 0)
     assert s.get_learning(target).statement == "Separate lots and trades into distinct tables"
     [rev] = s.learning_revisions(target)
