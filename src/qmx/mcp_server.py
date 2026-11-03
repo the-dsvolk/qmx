@@ -146,6 +146,24 @@ def build_server(settings: Settings, service: QmxService | None = None) -> FastM
         return svc.restore_learning(learning_id)
 
     @server.tool()
+    def learning_history(learning_id: int) -> list[dict] | None:
+        """A lesson's earlier versions, newest first — every in-place update keeps the old text.
+
+        Use it when a lesson looks wrong or off-topic (e.g. a bad consolidation merge overwrote it),
+        then ``revert_learning`` to put a previous version back. ``None`` if the lesson is unknown.
+        """
+        return svc.learning_history(learning_id)
+
+    @server.tool()
+    def revert_learning(learning_id: int, revision_id: int | None = None) -> dict | None:
+        """Restore a lesson from its history; ``revision_id`` defaults to the latest revision.
+
+        The current text is saved as a new revision first, so a revert can itself be reverted.
+        Returns the restored lesson, or ``None`` if ``learning_id`` does not exist.
+        """
+        return svc.revert_learning(learning_id, revision_id)
+
+    @server.tool()
     def park(
         text: str,
         why: str | None = None,

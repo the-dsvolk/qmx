@@ -21,7 +21,7 @@ from qmx.learnings import (
     update_learning,
 )
 from qmx.search import search
-from qmx.store import Store
+from qmx.store import SCHEMA_VERSION, Store
 from tests.fakes import FakeEmbedder
 
 
@@ -229,7 +229,8 @@ def test_v4_database_migrates_in_place_and_keeps_its_learnings(tmp_path):
         s._conn.commit()  # noqa: SLF001
 
     with Store.open(db, embedder.dim, "fake") as s:
-        assert s._conn.execute("PRAGMA user_version").fetchone()[0] == 5  # noqa: SLF001
+        version = s._conn.execute("PRAGMA user_version").fetchone()[0]  # noqa: SLF001
+        assert version == SCHEMA_VERSION  # v4 walks the whole chain up to the current schema
         assert s.get_learning(lid).statement == "sigma pre-migration lesson"
         assert s.get_learning(lid).is_live  # NULL deprecated_at reads as live
         assert deprecate_learning(s, lid, reason="post-migration").is_deprecated
