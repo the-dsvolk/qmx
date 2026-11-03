@@ -12,6 +12,16 @@ def test_defaults():
     assert s.ollama_url == "http://localhost:11434"
     assert s.embed_model == "qwen3-embedding:0.6b"
     assert s.embed_dim == 1024
+    assert s.chat_num_ctx == 65536
+    assert s.chat_timeout == 300.0
+    assert s.request_timeout == 60.0  # embeds/hooks keep the short timeout
+
+
+def test_judge_settings_from_env():
+    env = {"QMX_CHAT_NUM_CTX": "32768", "QMX_CHAT_TIMEOUT": "120"}
+    s = Settings.load(config_path=Path("/does/not/exist"), env=env)
+    assert s.chat_num_ctx == 32768 and isinstance(s.chat_num_ctx, int)
+    assert s.chat_timeout == 120.0 and isinstance(s.chat_timeout, float)
 
 
 def test_env_overrides_and_coerces():

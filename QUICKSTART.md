@@ -284,8 +284,10 @@ setup:
 ollama pull qwen3.6:35b-a3b     # on the Ollama host (the Spark); ~23 GB
 ```
 ```toml
-# ~/.qmx/config.toml — optional; this is the default, add only to override
+# ~/.qmx/config.toml — optional; these are the defaults, add only to override
 chat_model = "qwen3.6:35b-a3b"
+chat_num_ctx = 65536   # judge context window, sent per request (the model itself pins 32768)
+chat_timeout = 300     # judge-only HTTP timeout; request_timeout (60) stays short for hooks
 ```
 
 **B. Use it from the CLI:**

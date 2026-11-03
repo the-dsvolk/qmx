@@ -6,7 +6,12 @@ import json
 
 import pytest
 
-from qmx.consolidate import consolidate_session, extract_learnings
+from qmx.consolidate import (
+    CONSOLIDATE_SCHEMA,
+    EXTRACT_SCHEMA,
+    consolidate_session,
+    extract_learnings,
+)
 from qmx.index import index_transcript
 from qmx.learnings import add_learning, deprecate_learning, lessons
 from qmx.store import Store
@@ -184,3 +189,34 @@ def test_consolidate_update_patches_existing(store, tmp_path):
     assert s.get_learning(existing).statement == "raise IAM PRs project-level"
     # No duplicate learning created.
     assert len(s.list_learnings()) == 1
+
+
+def test_reasoning_is_the_first_required_field_of_both_schemas():
+    # Ollama emits fields in ``properties`` order, so the judge must reason before it decides.
+    for schema in (EXTRACT_SCHEMA, CONSOLIDATE_SCHEMA):
+        assert next(iter(schema["properties"])) == "reasoning"
+        assert schema["required"][0] == "reasoning"
+
+
+def test_replies_with_reasoning_still_apply(store, tmp_path):
+    s, embedder = store
+    doc_id = _chat_doc(s, embedder, tmp_path)
+    existing = add_learning(
+        s, embedder, type="howto", statement="raise IAM PRs", scope="the-dsvolk/qmx"
+    )
+    chat = FakeChat(
+        extractions=[[{"type": "howto", "statement": "raise IAM PRs carefully"}]],
+        decisions=[
+            {
+                "reasoning": "same lesson as the existing one; merge the project-level detail",
+                "action": "update",
+                "target_id": existing,
+                "statement": "raise IAM PRs project-level",
+            }
+        ],
+    )
+    res = consolidate_session(s, embedder, chat, doc_id, scope="the-dsvolk/qmx")
+    assert res.updated == 1 and res.created == 0
+    lesson = s.get_learning(existing)
+    assert lesson.statement == "raise IAM PRs project-level"
+    assert "same lesson" not in (lesson.detail or "")  # reasoning is never stored in the lesson

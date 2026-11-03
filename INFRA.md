@@ -174,6 +174,14 @@ export OLLAMA_HOST=127.0.0.1:11434
   swap models, pull the new tag on the Spark and change that one value.
 - **Batch, low-QPS.** Consolidation is a few calls at session end, so throughput is irrelevant;
   `session-end` runs it **detached** so it never blocks a session closing. Nothing is resident.
+- **Context and timeout (judge only).** qmx sends `num_ctx = chat_num_ctx` (default **65536**) on
+  every judge call: the served `qwen3.6` build pins 32768, and on an oversized prompt Ollama silently
+  keeps only about half the window, so long sessions were judged on 26-46% of their turns. 64K costs
+  the same memory (23 GB) and speed. The judge waits up to `chat_timeout` (default **300 s**);
+  `request_timeout` (60 s) stays short because it also bounds the synchronous Stop-hook embed.
+- **Reasoning-first JSON.** Both judge schemas start with a required `reasoning` string, so the
+  model analyses before it decides (thinking stays off). Eval 2026-11-02, 12 sessions blind-graded:
+  precision 3.8 vs 3.3/5, +46% judge time, no call over 60 s; Ollama thinking mode was ~10× slower.
 - **Deferred upgrade (only if v1 lessons are weak):** a `Qwen3.5-122B-A10B` in **NVFP4** on a
   **vLLM** server (NVFP4 ≠ GGUF → not Ollama). Point `chat_model`/`QMX_OLLAMA_URL` at it if built.
   See [`plan/qmx-learnings.md`](./plan/qmx-learnings.md) (*Model decision*).
@@ -190,6 +198,8 @@ Claude Code `settings.json` on the Mac — see the **Learnings** section of [`RE
   - **Learnings model:** `chat_model = "qwen3.6:35b-a3b"` (the consolidation judge — this is the one
     the `qmx consolidate` / `session-end` hook uses against the Spark's Ollama; must be pulled there).
     It defaults to this value, so the line is optional unless you swap models.
+    `chat_num_ctx = 65536` and `chat_timeout = 300` (env `QMX_CHAT_NUM_CTX` / `QMX_CHAT_TIMEOUT`)
+    are the judge's context window and timeout; both are defaults, so set them only to override.
   - **Reranker (optional):** `rerank_url = "http://spark-0e81.local:8081"` enables the cross-encoder.
 - Claude Code: `claude mcp add --transport http --scope user qmx http://127.0.0.1:8765/mcp`.
 
