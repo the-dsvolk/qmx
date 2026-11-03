@@ -13,6 +13,7 @@ Reads survive a missing embedding backend: the embedder is wrapped in a
 from __future__ import annotations
 
 import re
+from dataclasses import asdict
 from pathlib import Path
 
 from qmx.config import Settings
@@ -29,6 +30,7 @@ from qmx.learnings import (
     learning_to_dict,
     lessons,
     restore_learning,
+    revert_learning,
     update_learning,
 )
 from qmx.parked import (
@@ -196,6 +198,19 @@ class QmxService:
         """Undo a retirement — the lesson is live (and retrievable) again."""
         with self._store() as store:
             learning = restore_learning(store, learning_id)
+        return _learning_or_none(learning)
+
+    def learning_history(self, learning_id: int) -> list[dict] | None:
+        """A lesson's earlier versions, newest first (``None`` if the lesson does not exist)."""
+        with self._store() as store:
+            if store.get_learning(learning_id) is None:
+                return None
+            return [asdict(r) for r in store.learning_revisions(learning_id)]
+
+    def revert_learning(self, learning_id: int, revision_id: int | None = None) -> dict | None:
+        """Restore a lesson from its history (default: undo the latest update)."""
+        with self._store() as store:
+            learning = revert_learning(store, self._embedder, learning_id, revision_id)
         return _learning_or_none(learning)
 
     # -- parked items (plan/qmx-parked.md) -------------------------------------------------------

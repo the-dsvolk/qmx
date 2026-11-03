@@ -59,16 +59,25 @@ class FakeChat:
     """
 
     def __init__(
-        self, extractions: list[list[dict]] | None = None, decisions: list[dict] | None = None
+        self,
+        extractions: list[list[dict]] | None = None,
+        decisions: list[dict] | None = None,
+        checks: list[dict] | None = None,
     ) -> None:
         self._extractions = list(extractions or [])
         self._decisions = list(decisions or [])
+        # Merge-guardrail verdicts (PRESERVE_SYSTEM calls); default: the merge preserves the target.
+        self._checks = list(checks or [])
         self.decision_prompts: list[str] = []
+        self.check_prompts: list[str] = []
 
     def complete_json(self, system: str, user: str, schema: dict | None = None) -> dict:
         if "distill" in system:  # EXTRACT_SYSTEM
             learnings = self._extractions.pop(0) if self._extractions else []
             return {"learnings": learnings}
+        if "audit" in system:  # PRESERVE_SYSTEM (merge guardrail)
+            self.check_prompts.append(user)
+            return self._checks.pop(0) if self._checks else {"preserves": True, "lost": ""}
         self.decision_prompts.append(user)
         return self._decisions.pop(0) if self._decisions else {"action": "new"}
 

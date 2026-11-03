@@ -227,6 +227,8 @@ qmx update-learning 42 --statement "…" --clear-detail # fix the wording in pla
 qmx deprecate-learning 42 --reason "renegotiated" --superseded-by 57   # soft-retire + breadcrumb
 qmx lessons --deprecated                             # what's retired, why, and what replaced it
 qmx restore-learning 42                              # undo
+qmx learning-history 42                              # earlier versions (every update keeps the old text)
+qmx revert-learning 42                               # undo the last in-place update (--revision N)
 qmx fix-importance                                   # report lessons whose importance escaped 0..1
 ```
 
@@ -246,6 +248,15 @@ Consolidation retires too, so the loop closes: the judge's actions are
 nothing to replace it, and, because retired lessons are shown to it flagged `[RETIRED: why]`, it
 `drop`s a candidate that merely re-learns one instead of quietly resurrecting it next session. Both
 counts are reported by `qmx consolidate`, never silent.
+
+**Merge guardrails.** `update` is the only destructive action (supersede/deprecate keep the old row),
+and the judge sometimes "merges" a candidate into an *unrelated* neighbour, replacing that lesson's
+point — e.g. a household wash-sale rule rewritten as a lot-schema rule. So before any `update` the
+judge answers a second question: *does the merged text still state the target's core claim?* If not
+(or the answer is unusable), the update is refused, the target is left intact and the candidate is
+stored as a new lesson in its own words; `qmx consolidate` reports the count. Every in-place update —
+consolidation or manual — also snapshots the previous text (`learning_revisions`, schema v6), so
+`qmx learning-history` / `qmx revert-learning` (and the matching MCP tools) can undo a bad edit.
 
 **Hooks** (optional, wire in `settings.json` like the `Stop`/capture hook) — inject at start,
 consolidate at end (the latter runs detached so it never blocks session close):
@@ -298,9 +309,10 @@ listing and a "similar item" hint on park. Parking works with the Spark off — 
 ## Status
 
 Capabilities #1–#3 implemented: code search, chat recall, and the **learnings/consolidation** tier
-(schema v5; `add-learning`/`lessons`/`promote`, in-place `update-learning`,
-`deprecate-learning`/`restore-learning`, a `consolidate` judge that can
-new/update/supersede/deprecate/drop, and SessionStart/SessionEnd hooks). qmx
+(schema v6; `add-learning`/`lessons`/`promote`, in-place `update-learning` with revision
+history + `revert-learning`, `deprecate-learning`/`restore-learning`, a `consolidate` judge that
+can new/update/supersede/deprecate/drop behind a merge guardrail, and SessionStart/SessionEnd
+hooks). qmx
 indexes your Claude Code **conversation history** alongside code — `qmx backfill-chats` for past
 transcripts and a `Stop` hook (`qmx capture`) for live turns, recalled via `mcp__qmx__recall`. Built
 on the resident **MCP server**, tree-sitter chunking, incremental indexing, and hybrid **vector +
@@ -356,7 +368,8 @@ claude mcp add --transport http qmx http://spark-0e81.local:8765/mcp
 
 The tools then appear as `mcp__qmx__query`, `mcp__qmx__search_code`, `mcp__qmx__recall`,
 `mcp__qmx__lessons`, `mcp__qmx__add_learning`, `mcp__qmx__update_learning`,
-`mcp__qmx__deprecate_learning`, `mcp__qmx__restore_learning`, `mcp__qmx__park`,
+`mcp__qmx__deprecate_learning`, `mcp__qmx__restore_learning`, `mcp__qmx__learning_history`,
+`mcp__qmx__revert_learning`, `mcp__qmx__park`,
 `mcp__qmx__list_parked`, `mcp__qmx__unpark`, `mcp__qmx__resume_parked`, `mcp__qmx__get`,
 `mcp__qmx__status`.
 (`qmx serve --transport stdio` is available for a local, single-client setup.)
