@@ -42,6 +42,7 @@ from qmx.learnings import (
     lessons,
     normalize_importance,
     restore_learning,
+    revert_learning,
     update_learning,
 )
 from qmx.parked import ParkedNotFound, ParkedRepo, sync_index
@@ -429,6 +430,45 @@ def _cmd_restore_learning(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_learning_history(settings: Settings, args: argparse.Namespace) -> int:
+    """List a lesson's earlier versions (each in-place update snapshots the old content)."""
+    try:
+        with _open_store(settings) as store:
+            learning = store.get_learning(args.id)
+            revisions = store.learning_revisions(args.id) if learning else []
+    except StoreSchemaMismatch as exc:
+        print(f"learning-history failed: {exc}", file=sys.stderr)
+        return 1
+    if learning is None:
+        print(f"learning-history: no learning #{args.id}", file=sys.stderr)
+        return 1
+    print(f"#{learning.learning_id} now: {learning.statement}")
+    if not revisions:
+        print("  (no earlier revisions)")
+        return 0
+    for r in revisions:
+        print(f"  r{r.revision_id}  {r.revised_at}  (replaced by: {r.reason or 'unknown'})")
+        print(f"      was: {r.statement}")
+    print(f"`qmx revert-learning {args.id}` restores r{revisions[0].revision_id}; "
+          "add --revision N for an older one")
+    return 0
+
+
+def _cmd_revert_learning(settings: Settings, args: argparse.Namespace) -> int:
+    """Restore a lesson from its revision history (default: undo the latest update)."""
+    try:
+        with _open_store(settings) as store, OllamaEmbedder(settings) as embedder:
+            learning = revert_learning(store, embedder, args.id, args.revision)
+    except (StoreSchemaMismatch, EmbedBackendError, ValueError) as exc:
+        print(f"revert-learning failed: {exc}", file=sys.stderr)
+        return 1
+    if learning is None:
+        print(f"revert-learning: no learning #{args.id}", file=sys.stderr)
+        return 1
+    print(f"reverted learning #{learning.learning_id}: {learning.statement}")
+    return 0
+
+
 def _cmd_fix_importance(settings: Settings, args: argparse.Namespace) -> int:
     """Rescale `importance` values above 1.0 (model 1-5/1-10 answers) onto the documented 0..1.
 
@@ -598,7 +638,7 @@ def _cmd_consolidate(settings: Settings, args: argparse.Namespace) -> int:
                 targets = [doc_id for doc_id, _ in store.list_documents("chat")]
 
             created = updated = superseded = candidates = 0
-            deprecated = dropped = 0
+            deprecated = dropped = blocked = 0
             for doc_id in targets:
                 res = consolidate_session(store, embedder, chat, doc_id, scope=args.scope)
                 created += res.created
@@ -606,6 +646,7 @@ def _cmd_consolidate(settings: Settings, args: argparse.Namespace) -> int:
                 superseded += res.superseded
                 deprecated += res.deprecated
                 dropped += res.dropped
+                blocked += res.update_blocked
                 candidates += res.candidates
     except (StoreSchemaMismatch, EmbedBackendError, ChatBackendError) as exc:
         print(f"consolidate failed: {exc}", file=sys.stderr)
@@ -618,6 +659,9 @@ def _cmd_consolidate(settings: Settings, args: argparse.Namespace) -> int:
     if dropped:
         # Never let a discarded candidate look like one that was simply never extracted.
         print(f"  ({dropped} candidate(s) dropped as re-learning retired lessons; -v for which)")
+    if blocked:
+        print(f"  ({blocked} update(s) blocked by the merge guardrail — stored as new instead; "
+              "-v for which)")
     return 0
 
 
@@ -821,6 +865,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_res = sub.add_parser("restore-learning", help="un-retire a lesson deprecated by mistake")
     p_res.add_argument("id", type=int, help="learning id to revive")
 
+    p_his = sub.add_parser("learning-history", help="show a lesson's earlier versions")
+    p_his.add_argument("id", type=int, help="learning id")
+
+    p_rev = sub.add_parser(
+        "revert-learning", help="restore a lesson from its history (default: undo last update)"
+    )
+    p_rev.add_argument("id", type=int, help="learning id")
+    p_rev.add_argument("--revision", type=int, default=None, help="revision id (default: latest)")
+
     p_fix = sub.add_parser(
         "fix-importance", help="rescale out-of-range importance (>1) onto 0..1; dry run by default"
     )
@@ -921,6 +974,8 @@ _COMMANDS = {
     "update-learning": _cmd_update_learning,
     "deprecate-learning": _cmd_deprecate_learning,
     "restore-learning": _cmd_restore_learning,
+    "learning-history": _cmd_learning_history,
+    "revert-learning": _cmd_revert_learning,
     "fix-importance": _cmd_fix_importance,
     "lessons": _cmd_lessons,
     "promote": _cmd_promote,

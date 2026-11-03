@@ -25,7 +25,7 @@ from typing import Any
 
 import sqlite_vec
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 _IN_BATCH = 500  # max params per IN(...) chunk
 
 
@@ -81,6 +81,23 @@ class SearchHit:
     start_line: int | None = None
     end_line: int | None = None
     symbol: str | None = None
+
+
+@dataclass(slots=True)
+class LearningRevision:
+    """A learning's content as it was before one in-place update (see ``learning_revisions``)."""
+
+    revision_id: int
+    learning_id: int
+    type: str
+    topic: str | None
+    scope: str | None
+    statement: str
+    detail: str | None
+    importance: float
+    source_anchors: str | None
+    reason: str | None
+    revised_at: str
 
 
 @dataclass(slots=True)
@@ -201,6 +218,9 @@ class Store:
                 """
             )
             return 5
+        if version == 5:  # v5 -> v6: learning revision history (makes every update reversible)
+            self._create_revisions_schema()
+            return 6
         raise StoreSchemaMismatch(f"no migration path from schema v{version}")
 
     def _create_schema(self) -> None:
@@ -248,6 +268,7 @@ class Store:
         c.execute("INSERT INTO meta(key, value) VALUES('embed_dim', ?)", (str(self._embed_dim),))
         c.execute("INSERT INTO meta(key, value) VALUES('embed_model', ?)", (self._embed_model,))
         self._create_learnings_schema()
+        self._create_revisions_schema()
 
     def _create_learnings_schema(self) -> None:
         """The learnings tier (Capability #3): distilled lessons + the consolidation cursor.
@@ -284,6 +305,33 @@ class Store:
                 chunk_id INTEGER PRIMARY KEY REFERENCES chunks(chunk_id) ON DELETE CASCADE,
                 at       TEXT DEFAULT (datetime('now'))
             );
+            """
+        )
+
+    def _create_revisions_schema(self) -> None:
+        """Prior versions of a learning, written before every in-place update.
+
+        ``update`` is the one destructive edit (supersede/deprecate keep the old row and are
+        reversible), so its old content is snapshotted here — a bad consolidation merge, or a manual
+        edit, can then be inspected and reverted. Kept separate from
+        :meth:`_create_learnings_schema` so the older migration steps stay independent.
+        """
+        self._conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS learning_revisions (
+                revision_id    INTEGER PRIMARY KEY,
+                learning_id    INTEGER NOT NULL REFERENCES learnings(learning_id) ON DELETE CASCADE,
+                type           TEXT NOT NULL,
+                topic          TEXT,
+                scope          TEXT,
+                statement      TEXT NOT NULL,
+                detail         TEXT,
+                importance     REAL NOT NULL,
+                source_anchors TEXT,
+                reason         TEXT,  -- what replaced it: consolidate:update | manual | revert
+                revised_at     TEXT DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_revisions_learning ON learning_revisions(learning_id);
             """
         )
 
@@ -800,8 +848,12 @@ class Store:
         detail: str | None = KEEP,
         importance: float = KEEP,
         source_anchors: str | None = KEEP,
+        revision_reason: str | None = None,
     ) -> bool:
         """Patch a learning's fields in place; returns whether a row was touched.
+
+        The row's prior content is first copied to ``learning_revisions`` (same transaction), tagged
+        with ``revision_reason``, so every update can be inspected and reverted.
 
         Every field defaults to :data:`KEEP` (leave alone), so passing ``None`` for a nullable
         column (``topic``/``scope``/``detail``/``source_anchors``) **clears** it — that is how a
@@ -831,10 +883,28 @@ class Store:
         sets.append("updated_at=datetime('now')")
         params.append(learning_id)
         with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO learning_revisions(learning_id, type, topic, scope, statement, detail,
+                                               importance, source_anchors, reason)
+                SELECT learning_id, type, topic, scope, statement, detail, importance,
+                       source_anchors, ?
+                FROM learnings WHERE learning_id=?
+                """,
+                (revision_reason, learning_id),
+            )
             cur = self._conn.execute(
                 f"UPDATE learnings SET {', '.join(sets)} WHERE learning_id=?", params
             )
         return cur.rowcount > 0
+
+    def learning_revisions(self, learning_id: int) -> list[LearningRevision]:
+        """Prior versions of a learning, newest first (empty if it was never updated)."""
+        rows = self._conn.execute(
+            "SELECT * FROM learning_revisions WHERE learning_id=? ORDER BY revision_id DESC",
+            (learning_id,),
+        ).fetchall()
+        return [LearningRevision(**dict(r)) for r in rows]
 
     def deprecate_learning(
         self, learning_id: int, *, reason: str | None = None, superseded_by: int | None = None

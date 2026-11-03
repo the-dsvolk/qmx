@@ -141,6 +141,7 @@ def update_learning(
         statement=statement,
         detail=detail,
         importance=importance,
+        revision_reason="manual",
     )
     after = store.get_learning(learning_id)
     if after is None:  # pragma: no cover - the row was just read above
@@ -154,6 +155,49 @@ def update_learning(
         before.type, before.statement, before.detail, before.topic
     ):
         reembed_learning(store, embedder, learning_id)
+    return after
+
+
+def revert_learning(
+    store: Store, embedder: Embedder, learning_id: int, revision_id: int | None = None
+) -> Learning | None:
+    """Restore a lesson's content from its revision history; returns the row (``None`` if unknown).
+
+    ``revision_id`` defaults to the most recent revision — i.e. undo the last update (typically a
+    bad consolidation merge). The current content is snapshotted first (reason ``revert to rN``),
+    so a revert is itself reversible. Raises ``ValueError`` when there is nothing to revert to.
+    """
+    before = store.get_learning(learning_id)
+    if before is None:
+        return None
+    revisions = store.learning_revisions(learning_id)
+    if revision_id is None:
+        if not revisions:
+            raise ValueError(f"learning #{learning_id} has no revisions to revert to")
+        rev = revisions[0]
+    else:
+        rev = next((r for r in revisions if r.revision_id == revision_id), None)
+        if rev is None:
+            raise ValueError(f"revision {revision_id} is not a revision of learning #{learning_id}")
+    store.update_learning(
+        learning_id,
+        type=rev.type,
+        topic=rev.topic,
+        scope=rev.scope,
+        statement=rev.statement,
+        detail=rev.detail,
+        importance=rev.importance,
+        source_anchors=rev.source_anchors,
+        revision_reason=f"revert to r{rev.revision_id}",
+    )
+    after = store.get_learning(learning_id)
+    if after is None:  # pragma: no cover - the row was just read above
+        return None
+    if after.scope != before.scope and after.doc_id is not None:
+        store.upsert_document(
+            kind="learning", path=learning_doc_path(learning_id), repo=after.scope or "_global"
+        )
+    reembed_learning(store, embedder, learning_id)
     return after
 
 

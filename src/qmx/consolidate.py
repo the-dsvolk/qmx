@@ -102,6 +102,31 @@ EXTRACT_SCHEMA = {
     "required": ["reasoning", "learnings"],
 }
 
+# Merge guardrail. `update` is the one destructive consolidation edit (it rewrites a lesson in
+# place; supersede/deprecate keep the old row), and the judge sometimes "merges" a candidate into
+# an unrelated neighbour, replacing that lesson's point. Before applying an update, a second call
+# checks that the merged text still states the target's core claim. Embedding similarity can't make
+# this call — clobbers usually stay in the same domain (a wash-sale rule rewritten as a lot-schema
+# rule).
+# Validated 2026-11-02 on 30 real merges: caught all 7 the blind graders flagged as clobbers.
+PRESERVE_SYSTEM = (
+    "You audit one edit to a knowledge base of engineering lessons. OLD is an existing lesson; "
+    "NEW is the text proposed to REPLACE it. Decide whether NEW still states OLD's core claim — "
+    "its main rule, fact or correction — possibly reworded, narrowed slightly, or extended with "
+    "new detail. If OLD's core claim is missing, contradicted, or NEW is really about a different "
+    "subject, it does NOT preserve it. Think it through in `reasoning` first, then answer."
+)
+
+PRESERVE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "reasoning": {"type": "string"},
+        "preserves": {"type": "boolean"},
+        "lost": {"type": "string"},
+    },
+    "required": ["reasoning", "preserves", "lost"],
+}
+
 CONSOLIDATE_ACTIONS = ("new", "update", "supersede", "deprecate", "drop")
 
 CONSOLIDATE_SCHEMA = {
@@ -128,6 +153,9 @@ class ConsolidateResult:
     superseded: int = 0
     deprecated: int = 0  # existing lessons retired by the judge (no replacement stored)
     dropped: int = 0  # candidates discarded as re-learning an already-retired lesson
+    # `update`s refused by the merge guardrail (the merge would lose the target's core claim); each
+    # such candidate is stored as a new lesson instead, so it is also counted in ``created``.
+    update_blocked: int = 0
     chunks_consolidated: int = 0
     learning_ids: list[int] = field(default_factory=list)
 
@@ -199,18 +227,33 @@ def consolidate_candidate(
         return
 
     if action == "update" and _valid_target(target_id, matches):
-        # Only pass what the merge actually produced: in `update_learning` a ``None`` *clears* the
-        # column, so an absent detail/anchors must be omitted rather than sent as None.
-        patch: dict = {"statement": statement, "importance": importance}
-        if detail is not None:
-            patch["detail"] = detail
-        if source_anchors:
-            patch["source_anchors"] = json.dumps(source_anchors)
-        store.update_learning(target_id, **patch)
-        reembed_learning(store, embedder, target_id)
-        result.updated += 1
-        result.learning_ids.append(target_id)
-        return
+        target = next(m for m in matches if m.learning_id == target_id)
+        keeps, lost = _merge_preserves(chat, target, statement, detail)
+        if keeps:
+            # Only pass what the merge actually produced: in `update_learning` a ``None`` *clears*
+            # the column, so an absent detail/anchors must be omitted rather than sent as None.
+            patch: dict = {"statement": statement, "importance": importance}
+            if detail is not None:
+                patch["detail"] = detail
+            if source_anchors:
+                patch["source_anchors"] = json.dumps(source_anchors)
+            store.update_learning(target_id, **patch, revision_reason="consolidate:update")
+            reembed_learning(store, embedder, target_id)
+            result.updated += 1
+            result.learning_ids.append(target_id)
+            return
+        # Refused: keep the target intact and store the candidate in its *own* words (the judge's
+        # merged text is a blend of target + candidate and would duplicate the target).
+        log.info(
+            "blocked update of learning #%s (merge would lose: %s); storing candidate as new",
+            target_id,
+            lost or "its core claim",
+        )
+        result.update_blocked += 1
+        statement = candidate["statement"]
+        detail = candidate.get("detail")
+        importance = normalize_importance(candidate.get("importance", 0.5))
+        action = "new"
 
     new_id = add_learning(
         store,
@@ -297,6 +340,27 @@ def _decide(chat: ChatModel, candidate: dict, matches: list[Learning]) -> dict:
         + f"\n\nEXISTING similar lessons:\n{listing}"
     )
     return chat.complete_json(CONSOLIDATE_SYSTEM, user, schema=CONSOLIDATE_SCHEMA)
+
+
+def _merge_preserves(
+    chat: ChatModel, target: Learning, statement: str, detail: str | None
+) -> tuple[bool, str]:
+    """Ask the judge whether the merged text still states ``target``'s core claim.
+
+    Returns ``(preserves, what_was_lost)``. Fails safe: an unusable reply counts as *not*
+    preserved, so a broken check costs a possible near-duplicate, never a destroyed lesson.
+    """
+
+    def text(s: str, d: str | None) -> str:
+        return s + (f"\ndetail: {d}" if d else "")
+
+    reply = chat.complete_json(
+        PRESERVE_SYSTEM,
+        f"OLD:\n{text(target.statement, target.detail)}\n\nNEW:\n{text(statement, detail)}",
+        schema=PRESERVE_SCHEMA,
+    )
+    preserves = reply.get("preserves")
+    return (preserves is True), str(reply.get("lost") or "")
 
 
 def _describe_match(m: Learning) -> str:
