@@ -38,12 +38,13 @@ class OllamaChat:
 
     def __init__(self, settings: Settings, client: httpx.Client | None = None) -> None:
         self._model = settings.chat_model
+        self._num_ctx = settings.chat_num_ctx
         self._max_retries = settings.max_retries
         self._base_delay = settings.retry_base_delay
         self._owns_client = client is None
         self._client = client or httpx.Client(
             base_url=settings.ollama_url.rstrip("/"),
-            timeout=settings.request_timeout,
+            timeout=settings.chat_timeout,  # judge-only ceiling; see Settings.chat_timeout
         )
 
     def complete_json(self, system: str, user: str, schema: dict | None = None) -> dict:
@@ -56,10 +57,16 @@ class OllamaChat:
             "stream": False,
             "think": False,  # no thinking tokens — we want the JSON object directly
             "format": schema if schema is not None else "json",
-            "options": {"temperature": 0.0},
+            "options": self._options(),
         }
         content = self._post_with_retry("/api/chat", payload)
         return _parse_json_object(content)
+
+    def _options(self) -> dict:
+        options: dict = {"temperature": 0.0}
+        if self._num_ctx > 0:  # 0 = keep the model's own num_ctx
+            options["num_ctx"] = self._num_ctx
+        return options
 
     def _post_with_retry(self, path: str, payload: dict) -> str:
         last_exc: Exception | None = None

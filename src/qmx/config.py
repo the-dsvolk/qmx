@@ -24,6 +24,8 @@ _ENV_MAP = {
     "QMX_RERANK_URL": "rerank_url",
     "QMX_RERANK_MODEL": "rerank_model",
     "QMX_CHAT_MODEL": "chat_model",
+    "QMX_CHAT_NUM_CTX": "chat_num_ctx",
+    "QMX_CHAT_TIMEOUT": "chat_timeout",
     "QMX_MCP_HOST": "mcp_host",
     "QMX_MCP_PORT": "mcp_port",
     "QMX_EMBED_DIM": "embed_dim",
@@ -59,6 +61,15 @@ class Settings:
     rerank_model: str = "qwen3-reranker"
     # Consolidation/learnings judge — read from here, never hardcoded (see plan/qmx-learnings.md).
     chat_model: str = "qwen3.6:35b-a3b"
+    # Judge context window, sent per request as Ollama ``num_ctx`` (the served qwen3.6 build pins
+    # 32768 in its Modelfile). On an oversized prompt Ollama silently keeps only about half the
+    # window, so at 32K long sessions were judged on 26-46% of their turns; 65536 fixes that at the
+    # same speed and memory (hybrid attention: 23 GB at both). 0 = leave it to the model default.
+    chat_num_ctx: int = 65536
+    # Judge HTTP timeout. Deliberately separate from ``request_timeout``: that one is also the read
+    # timeout of the synchronous Stop-hook embed and of MCP queries, which must stay short. The
+    # judge runs detached at session end, so a generous ceiling blocks nobody.
+    chat_timeout: float = 300.0
 
     # Reranker: base URL of a Cohere-style /v1/rerank server (llama.cpp llama-server --reranking).
     # Empty = disabled (RRF-only). e.g. "http://spark-0e81.local:8081".
@@ -141,8 +152,11 @@ def _coerce_value(name: str, raw: object) -> object:
     if name in {"memory_globs", "code_roots", "capture_exclude_roots"}:
         items = raw.split(",") if isinstance(raw, str) else list(raw)
         return tuple(s.strip() for s in items if str(s).strip())
-    if name in {"embed_dim", "embed_batch_size", "max_retries", "mcp_port", "parked_stale_days"}:
+    if name in {
+        "embed_dim", "embed_batch_size", "max_retries", "mcp_port", "parked_stale_days",
+        "chat_num_ctx",
+    }:
         return int(raw)
-    if name in {"request_timeout", "retry_base_delay"}:
+    if name in {"request_timeout", "retry_base_delay", "chat_timeout"}:
         return float(raw)
     return str(raw)

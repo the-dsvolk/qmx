@@ -52,7 +52,9 @@ EXTRACT_SYSTEM = (
     "Each lesson: a crisp one-sentence `statement`, a `detail` (the why/correction/better way), "
     "a `type` (decision|mistake|howto), a short `topic` slug, and an `importance` as a decimal "
     "between 0.0 and 1.0 (e.g. 0.8 — NOT a 1-5 or 1-10 rating). "
-    "Return JSON {\"learnings\": [...]}; return an empty list if nothing is durable."
+    "Return JSON {\"learnings\": [...]}; return an empty list if nothing is durable. "
+    "Before listing lessons, think it through in the `reasoning` field: walk the session, name "
+    "each candidate lesson and say why it is or is not durable. Then fill `learnings`."
 )
 
 CONSOLIDATE_SYSTEM = (
@@ -67,12 +69,21 @@ CONSOLIDATE_SYSTEM = (
     "`drop` (the candidate only re-learns a lesson already marked RETIRED — do not resurrect it). "
     "Prefer `update`/`supersede` over creating near-duplicates. Lessons marked RETIRED were "
     "retired on purpose: never `update`, `supersede` or `deprecate` them. "
-    "Return JSON {action, target_id, statement, detail, importance, reason}."
+    "Return JSON {action, target_id, statement, detail, importance, reason}. "
+    "Before deciding, think it through in the `reasoning` field: compare the candidate with each "
+    "existing lesson (same lesson? corrects it? unrelated?). Then fill the remaining fields."
 )
 
+# ``reasoning`` is the FIRST property of both schemas on purpose: Ollama turns the schema into a
+# grammar that emits fields in ``properties`` order, so the model writes its analysis before it
+# commits to lessons / an action — most of thinking mode's benefit without its cost. qmx ignores
+# the field's content (it is only logged). Measured 2026-11-02 on 12 real sessions, blind-graded:
+# precision 3.8 vs 3.3/5, 7 of 11 sessions won, +46% judge time, no call over 60 s; Ollama thinking
+# mode on the same model was ~10x slower.
 EXTRACT_SCHEMA = {
     "type": "object",
     "properties": {
+        "reasoning": {"type": "string"},
         "learnings": {
             "type": "array",
             "items": {
@@ -88,7 +99,7 @@ EXTRACT_SCHEMA = {
             },
         }
     },
-    "required": ["learnings"],
+    "required": ["reasoning", "learnings"],
 }
 
 CONSOLIDATE_ACTIONS = ("new", "update", "supersede", "deprecate", "drop")
@@ -96,6 +107,7 @@ CONSOLIDATE_ACTIONS = ("new", "update", "supersede", "deprecate", "drop")
 CONSOLIDATE_SCHEMA = {
     "type": "object",
     "properties": {
+        "reasoning": {"type": "string"},
         "action": {"type": "string", "enum": list(CONSOLIDATE_ACTIONS)},
         "target_id": {"type": ["integer", "null"]},
         "statement": {"type": "string"},
@@ -103,7 +115,7 @@ CONSOLIDATE_SCHEMA = {
         "importance": {"type": "number"},
         "reason": {"type": "string"},
     },
-    "required": ["action"],
+    "required": ["reasoning", "action"],
 }
 
 
@@ -154,6 +166,13 @@ def consolidate_candidate(
     matches = _nearest_learnings(store, embedder, candidate["statement"], scope)
     decision = _decide(chat, candidate, matches) if matches else {"action": "new"}
     action = decision.get("action", "new")
+    log.debug(
+        "judge %s (target %s) for %r: %s",
+        action,
+        decision.get("target_id"),
+        candidate["statement"][:80],
+        decision.get("reasoning", ""),
+    )
     statement = decision.get("statement") or candidate["statement"]
     detail = decision.get("detail") or candidate.get("detail")
     # Rescale here, at the model boundary: the judge is asked for 0..1 but sometimes answers on a
