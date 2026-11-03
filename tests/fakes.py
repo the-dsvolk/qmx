@@ -63,6 +63,7 @@ class FakeChat:
         extractions: list[list[dict]] | None = None,
         decisions: list[dict] | None = None,
         checks: list[dict] | None = None,
+        retire_checks: list[dict] | None = None,
     ) -> None:
         self._extractions = list(extractions or [])
         self._decisions = list(decisions or [])
@@ -70,6 +71,8 @@ class FakeChat:
         self._checks = list(checks or [])
         self.decision_prompts: list[str] = []
         self.check_prompts: list[str] = []
+        self._retire_checks = list(retire_checks or [])
+        self.retire_prompts: list[str] = []
 
     def complete_json(self, system: str, user: str, schema: dict | None = None) -> dict:
         if "distill" in system:  # EXTRACT_SYSTEM
@@ -83,6 +86,14 @@ class FakeChat:
             new = user.split("NEW:\n", 1)[1].split("\n", 1)[0] if "NEW:\n" in user else ""
             return {"preserves": True, "evidence_in_new": new, "unsupported_additions": [],
                     "lost": ""}
+        if "proposal to RETIRE" in system:  # DEPRECATE_SYSTEM (retirement guardrail)
+            self.retire_prompts.append(user)
+            if self._retire_checks:
+                return self._retire_checks.pop(0)
+            # Default: the candidate contradicts OLD, quoting the candidate's first line.
+            marker = "CANDIDATE:\n"
+            cand = user.split(marker, 1)[1].split("\n", 1)[0] if marker in user else ""
+            return {"contradicts": True, "contradiction_quote": cand}
         self.decision_prompts.append(user)
         return self._decisions.pop(0) if self._decisions else {"action": "new"}
 

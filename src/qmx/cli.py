@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 from qmx.capture import capture
-from qmx.chat import ChatBackendError, OllamaChat
+from qmx.chat import ChatBackendError, make_chat
 from qmx.config import Settings
 from qmx.consolidate import consolidate_session
 from qmx.embed import (
@@ -622,7 +622,7 @@ def _cmd_consolidate(settings: Settings, args: argparse.Namespace) -> int:
         with (
             _open_store(settings) as store,
             OllamaEmbedder(settings) as embedder,
-            OllamaChat(settings) as chat,
+            make_chat(settings) as chat,
         ):
             targets: list[int] = []
             if args.session:
@@ -654,7 +654,13 @@ def _cmd_consolidate(settings: Settings, args: argparse.Namespace) -> int:
                 passes += res.passes
                 skipped += res.skipped_small
                 candidates += res.candidates
-    except (StoreSchemaMismatch, EmbedBackendError, ChatBackendError) as exc:
+    except ChatBackendError as exc:
+        # Deferred, not lost: a pass is only marked consolidated once it finishes, so these turns
+        # stay queued and the nightly `qmx consolidate --all` (or the next session end) retries.
+        print(f"consolidate deferred — judge unreachable: {exc}\n"
+              "  turns left un-consolidated; the next run will pick them up", file=sys.stderr)
+        return 1
+    except (StoreSchemaMismatch, EmbedBackendError, ValueError) as exc:
         print(f"consolidate failed: {exc}", file=sys.stderr)
         return 1
     print(

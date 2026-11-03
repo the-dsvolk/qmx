@@ -98,9 +98,42 @@ def test_strict_check_rejects_preserves_true_without_a_real_quote(store, tmp_pat
     assert kept == "Track wash-sale freezes across all household accounts"
 
 
-def test_strict_check_rejects_unsupported_additions(store, tmp_path):
+def test_unsupported_additions_warn_but_do_not_block(store, tmp_path, caplog):
     _, _, res = _update(store, tmp_path, {
         "preserves": True, "lost": "",
         "evidence_in_new": "Track wash-sale freezes across all household accounts",
         "unsupported_additions": ["E*TRADE never reports wash sales"]})
-    assert (res.updated, res.update_blocked) == (0, 1)
+    assert (res.updated, res.update_blocked) == (1, 0)
+    assert "adds facts found in neither lesson" in caplog.text
+
+
+def _deprecate(store, tmp_path, retire_check: dict | None):
+    s, embedder = store
+    doc = _doc(s, embedder, tmp_path, ["cursor sdk test", "inline OAuth servers lose saved logins"])
+    target = add_learning(s, embedder, type="howto", scope=SCOPE,
+                          statement="Load OAuth MCP servers via setting_sources, not inline")
+    chat = FakeChat(
+        extractions=[[{"type": "howto", "statement": "Store the Cursor API key in the Keychain"}]],
+        decisions=[{"action": "deprecate", "target_id": target, "reason": "obsolete"}],
+        retire_checks=[retire_check] if retire_check else None,
+    )
+    res = consolidate_session(s, embedder, chat, doc, scope=SCOPE)
+    return s, target, res
+
+
+def test_retirement_needs_a_real_contradiction(store, tmp_path):
+    s, target, res = _deprecate(store, tmp_path, {"contradicts": False, "contradiction_quote": ""})
+    assert (res.deprecated, res.deprecate_blocked, res.created) == (0, 1, 1)
+    assert s.get_learning(target).is_live  # the correct lesson stays live
+
+
+def test_retirement_quote_must_be_in_the_candidate(store, tmp_path):
+    _, _, res = _deprecate(store, tmp_path, {
+        "contradicts": True, "contradiction_quote": "setting_sources no longer works"})
+    assert (res.deprecated, res.deprecate_blocked) == (0, 1)
+
+
+def test_verified_contradiction_retires(store, tmp_path):
+    s, target, res = _deprecate(store, tmp_path, None)  # default fake quotes the candidate
+    assert (res.deprecated, res.deprecate_blocked, res.created) == (1, 0, 0)
+    assert not s.get_learning(target).is_live

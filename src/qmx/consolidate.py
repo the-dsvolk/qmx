@@ -53,8 +53,10 @@ EXTRACT_SYSTEM = (
     "Keep only lessons worth recalling next time: a decision and why, a mistake and its "
     "correction, or a repeatable how-to. Drop chit-chat, one-offs, and restated context. "
     "A one-off lookup, status check or Q&A with no reusable insight has no lessons: return an "
-    "empty list. Each lesson must generalize beyond this session — no scenario-specific numbers, "
-    "dates, deadlines, balances or task status, and no first-person narrative. State only what "
+    "empty list. Write each lesson so it is reusable beyond this session: drop scenario-specific "
+    "values (balances, dates, deadlines, one-off task status) and first-person narrative, but "
+    "keep the concrete commands, settings, thresholds and names that make it actionable. State "
+    "only what "
     "the transcript supports and keep its hedges (never turn \"generally\" or \"usually\" into "
     "\"always\"). "
     "Each lesson: a crisp one-sentence `statement`, a `detail` (the why/correction/better way), "
@@ -145,6 +147,27 @@ PRESERVE_SCHEMA = {
     ],
 }
 
+# Retirement guardrail. `deprecate` hides a lesson; the judge has retired lessons it itself called
+# correct (#380, three times across eval runs). Before retiring, the judge must quote the part of
+# the CANDIDATE that contradicts the old lesson; code checks the quote really is in the candidate.
+DEPRECATE_SYSTEM = (
+    "You review a proposal to RETIRE an existing engineering lesson as wrong or obsolete. OLD is "
+    "the lesson; CANDIDATE is what was just learned. Copy, verbatim, the shortest span of "
+    "CANDIDATE that contradicts or obsoletes OLD — leave it empty if CANDIDATE does not actually "
+    "contradict OLD (adding detail, narrowing it, or agreeing with it is NOT a contradiction). "
+    "Think it through in `reasoning` first, then answer."
+)
+
+DEPRECATE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "reasoning": {"type": "string"},
+        "contradiction_quote": {"type": "string"},
+        "contradicts": {"type": "boolean"},
+    },
+    "required": ["reasoning", "contradiction_quote", "contradicts"],
+}
+
 CONSOLIDATE_ACTIONS = ("new", "update", "supersede", "deprecate", "drop")
 
 CONSOLIDATE_SCHEMA = {
@@ -174,6 +197,7 @@ class ConsolidateResult:
     # `update`s refused by the merge guardrail (the merge would lose the target's core claim); each
     # such candidate is stored as a new lesson instead, so it is also counted in ``created``.
     update_blocked: int = 0
+    deprecate_blocked: int = 0  # retirements refused (no verifiable contradiction); stored as new
     passes: int = 0  # extract passes run (a long session is split into several)
     skipped_small: bool = False  # below the one-off gate; turns left un-consolidated to accumulate
     chunks_consolidated: int = 0
@@ -240,11 +264,20 @@ def consolidate_candidate(
         return
 
     if action == "deprecate" and _valid_target(target_id, matches):
-        reason = decision.get("reason") or f"contradicted while learning: {statement}"
-        deprecate_learning(store, target_id, reason=reason)
-        log.info("deprecated learning #%s: %s", target_id, reason)
-        result.deprecated += 1
-        return
+        target = next(m for m in matches if m.learning_id == target_id)
+        if _contradiction_verified(chat, target, candidate):
+            reason = decision.get("reason") or f"contradicted while learning: {statement}"
+            deprecate_learning(store, target_id, reason=reason)
+            log.info("deprecated learning #%s: %s", target_id, reason)
+            result.deprecated += 1
+            return
+        # Refused: keep the old lesson live and store the candidate in its own words.
+        log.info("blocked retirement of learning #%s: no verifiable contradiction", target_id)
+        result.deprecate_blocked += 1
+        statement = candidate["statement"]
+        detail = candidate.get("detail")
+        importance = normalize_importance(candidate.get("importance", 0.5))
+        action = "new"
 
     if action == "update" and _valid_target(target_id, matches):
         target = next(m for m in matches if m.learning_id == target_id)
@@ -400,7 +433,7 @@ def _merge_preserves(
     Strict: the judge must quote where the old claim survives, and the quote is checked against
     the merged text in code (a bare "preserves: true" is not enough — a lenient judge approved
     every merge it was shown). Facts in the merge that come from neither the old lesson nor the
-    candidate also block it, so a merge cannot smuggle in claims nobody learned. Returns
+    candidate are logged as a warning (not a block). Returns
     ``(preserves, why_not)``. Fails safe: an unusable reply counts as *not* preserved.
     """
 
@@ -422,8 +455,30 @@ def _merge_preserves(
     if not quoted:
         return False, "no verbatim evidence that the merged text still states the old claim"
     if additions:
-        return False, "adds facts found in neither lesson: " + "; ".join(additions[:3])
+        # Logged, not blocked: in a blind review, blocking on additions turned most merges into
+        # near-duplicate NEW lessons (dedup fell 3.67 -> 2.83). The verbatim quote above is what
+        # actually catches a merge that overwrote the old lesson.
+        log.warning("merge into #%s adds facts found in neither lesson: %s",
+                    target.learning_id if hasattr(target, "learning_id") else "?",
+                    "; ".join(additions[:3]))
     return True, ""
+
+
+def _contradiction_verified(chat: ChatModel, target: Learning, candidate: dict) -> bool:
+    """True only if the judge quotes a span of the candidate that contradicts ``target``.
+
+    The quote is checked against the candidate's text in code; an unusable reply fails safe (the
+    lesson stays live).
+    """
+    cand_text = candidate["statement"] + (
+        f"\ndetail: {candidate['detail']}" if candidate.get("detail") else ""
+    )
+    old_text = target.statement + (f"\ndetail: {target.detail}" if target.detail else "")
+    reply = chat.complete_json(
+        DEPRECATE_SYSTEM, f"OLD:\n{old_text}\n\nCANDIDATE:\n{cand_text}", schema=DEPRECATE_SCHEMA
+    )
+    quote = str(reply.get("contradiction_quote") or "").strip()
+    return reply.get("contradicts") is True and bool(quote) and _norm(quote) in _norm(cand_text)
 
 
 def _norm(s: str) -> str:

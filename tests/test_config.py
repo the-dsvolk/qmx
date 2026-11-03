@@ -17,6 +17,7 @@ def test_defaults():
     assert s.request_timeout == 60.0  # embeds/hooks keep the short timeout
     assert s.chat_think == "false"
     assert (s.consolidate_min_turns, s.consolidate_min_chars) == (8, 4000)
+    assert (s.chat_backend, s.chat_url, s.chat_max_tokens) == ("ollama", "", 8192)
 
 
 def test_judge_settings_from_env():
