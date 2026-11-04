@@ -189,9 +189,11 @@ export OLLAMA_HOST=127.0.0.1:11434
   allows any whitespace between JSON tokens. When the judge writes an unescaped `"` in a text field,
   the string closes early and greedy decoding emits newlines until the token cap: roughly 1 in 50-100
   real calls, and on 2026-11-03 one such merge check (retried 5 x 300 s) deferred a whole `--all`.
-  qmx therefore sends a per-request grammar admitting exactly `json.dumps(indent=2)`
-  (`chat_json_layout = "indent"`, the default; `"schema"` restores `response_format`), every judge
-  prompt asks for single quotes inside values, and decisions/checks are capped at 3072 output tokens.
+  Every judge prompt now asks for single quotes inside values, and decisions/checks are capped at
+  3072 output tokens. `chat_json_layout = "indent"` (opt-in; default `"schema"` = `response_format`)
+  sends a per-request grammar admitting exactly `json.dumps(indent=2)`, which removes the loop
+  entirely; it stays off until its decoding speed matches xgrammar's own EBNF (3-5x slower in a
+  2026-11-04 check).
   An unusable reply (cut off at the cap, no reply before the timeout while `/models` still answers,
   or not JSON) fails safe for that one call: decision -> stored as new, merge/retirement check ->
   refused, dedup check -> candidate kept, extract -> its pass stays queued. Three unusable replies in

@@ -132,11 +132,11 @@ class OpenAIChat:
     ``chat_think`` (vLLM/Qwen chat templates take ``enable_thinking`` and an optional
     ``reasoning_effort``), output capped at ``chat_max_tokens``.
 
-    JSON layout (``chat_json_layout``): "indent" (default) sends a per-request grammar admitting
-    exactly ``json.dumps(obj, indent=2)`` (``structured_outputs.grammar``, see :mod:`qmx.grammar`)
-    — ``response_format``'s free whitespace lets a prematurely closed string loop on newlines until
-    the token cap. "schema" sends ``response_format: json_schema`` (the pre-2026-11-04 behaviour,
-    and the automatic fallback when a server rejects grammars or a schema is outside the subset).
+    JSON layout (``chat_json_layout``): "schema" (default) sends ``response_format: json_schema``.
+    "indent" (opt-in) sends a per-request grammar admitting exactly ``json.dumps(obj, indent=2)``
+    (``structured_outputs.grammar``, see :mod:`qmx.grammar`) — ``response_format``'s free whitespace
+    lets a prematurely closed string loop on newlines until the token cap; "indent" falls back to
+    "schema" when a server rejects grammars or a schema is outside the subset.
 
     Failure split: connection errors / 5xx are retried and end in :class:`ChatBackendError`
     (defer). A reply cut off at the cap, a non-JSON reply, or a read timeout while ``/models``

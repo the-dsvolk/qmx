@@ -67,7 +67,8 @@ def test_openai_backend_request_shape():
     from qmx.chat import OpenAIChat
 
     captured: list[dict] = []
-    s = Settings(chat_backend="openai", chat_url="http://vllm.test/v1", chat_model="qwen3.8-judge")
+    s = Settings(chat_backend="openai", chat_url="http://vllm.test/v1", chat_model="qwen3.8-judge",
+                 chat_json_layout="indent")
     chat = OpenAIChat(s, client=_openai_client(captured))
     assert chat.complete_json("sys", "user", schema=CONSOLIDATE_SCHEMA) == {"action": "new"}
     [req] = captured
@@ -75,7 +76,7 @@ def test_openai_backend_request_shape():
     body = req["body"]
     assert body["model"] == "qwen3.8-judge" and body["temperature"] == 0.0
     assert body["max_tokens"] == 8192
-    # Default layout: a per-request fixed-indent grammar instead of response_format (qmx.grammar).
+    # "indent" layout: a per-request fixed-indent grammar instead of response_format (qmx.grammar).
     assert body["structured_outputs"] == {"grammar": json_grammar(CONSOLIDATE_SCHEMA)}
     assert "response_format" not in body
     assert body["chat_template_kwargs"] == {"enable_thinking": False}
@@ -129,9 +130,10 @@ def _openai(replies, posts, healthy=True, **kw):
     return OpenAIChat(s, client=_scripted(replies, posts, healthy))
 
 
-def test_schema_layout_and_schemaless_calls_use_response_format():
+def test_default_layout_and_schemaless_calls_use_response_format():
+    assert Settings().chat_json_layout == "schema"  # grammar layout is opt-in for now
     posts: list[dict] = []
-    chat = _openai([_reply(), _reply()], posts, chat_json_layout="schema")
+    chat = _openai([_reply(), _reply()], posts)
     chat.complete_json("s", "u", schema=CONSOLIDATE_SCHEMA)
     assert posts[0]["response_format"]["json_schema"]["schema"] == CONSOLIDATE_SCHEMA
     assert "structured_outputs" not in posts[0]
@@ -143,7 +145,8 @@ def test_schema_outside_the_grammar_subset_falls_back_to_response_format():
     posts: list[dict] = []
     odd = {"type": "object", "properties": {"a": {"type": "string", "pattern": "x"}},
            "required": ["a"]}
-    _openai([_reply('{"a": "x"}')], posts).complete_json("s", "u", schema=odd)
+    _openai([_reply('{"a": "x"}')], posts, chat_json_layout="indent").complete_json(
+        "s", "u", schema=odd)
     assert "structured_outputs" not in posts[0] and posts[0]["response_format"]["json_schema"]
 
 
@@ -219,7 +222,8 @@ def test_three_unusable_replies_in_a_row_escalate_to_backend_error():
 
 def test_server_rejecting_grammars_falls_back_for_the_rest_of_the_run():
     posts: list[dict] = []
-    chat = _openai([(400, "Invalid grammar: unknown rule"), _reply(), _reply()], posts)
+    chat = _openai([(400, "Invalid grammar: unknown rule"), _reply(), _reply()], posts,
+                   chat_json_layout="indent")
     assert chat.complete_json("s", "u", schema=CONSOLIDATE_SCHEMA) == {"action": "new"}
     chat.complete_json("s", "u", schema=CONSOLIDATE_SCHEMA)
     assert "structured_outputs" in posts[0]

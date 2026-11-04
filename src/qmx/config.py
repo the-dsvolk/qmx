@@ -93,11 +93,13 @@ class Settings:
     # Cap on judge output tokens (reasoning field included) so one rambling reply cannot run away.
     # Short judge calls (decisions and checks) use a lower per-call cap; see qmx.consolidate.
     chat_max_tokens: int = 8192
-    # JSON layout the "openai" backend asks for. "indent" (default): a per-request grammar that
-    # admits exactly json.dumps(indent=2) — no free whitespace, so a string the model closes early
-    # cannot loop on newlines until the cap (qmx.grammar). "schema": plain response_format
-    # json_schema, for servers without per-request grammars (vLLM's structured_outputs.grammar).
-    chat_json_layout: str = "indent"
+    # JSON layout the "openai" backend asks for. "schema" (default): response_format json_schema.
+    # "indent": a per-request grammar admitting exactly json.dumps(indent=2) — no free whitespace,
+    # so a string the model closes early cannot loop on newlines (qmx.grammar). Opt-in for now:
+    # on 2026-11-04 the generated grammar decoded 3-5x slower than xgrammar's own EBNF for the same
+    # language (likely the missing string lookahead), so it stays off until that is fixed. Loops
+    # under "schema" are bounded by the per-call caps and fail safe (ChatReplyError).
+    chat_json_layout: str = "schema"
     # One-off gate for ``qmx consolidate`` / session-end: sessions with fewer turns or characters
     # than this are skipped (and left un-consolidated so a resumed session can accumulate).
     consolidate_min_turns: int = 8
