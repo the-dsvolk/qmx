@@ -638,12 +638,13 @@ def _cmd_consolidate(settings: Settings, args: argparse.Namespace) -> int:
                 targets = [doc_id for doc_id, _ in store.list_documents("chat")]
 
             created = updated = superseded = candidates = 0
-            deprecated = dropped = blocked = passes = skipped = 0
+            deprecated = dropped = blocked = passes = skipped = dup_dropped = dup_merged = 0
             for doc_id in targets:
                 res = consolidate_session(
                     store, embedder, chat, doc_id, scope=args.scope,
                     min_turns=settings.consolidate_min_turns,
                     min_chars=settings.consolidate_min_chars,
+                    dedup_min_similarity=settings.dedup_min_similarity,
                 )
                 created += res.created
                 updated += res.updated
@@ -652,6 +653,8 @@ def _cmd_consolidate(settings: Settings, args: argparse.Namespace) -> int:
                 dropped += res.dropped
                 blocked += res.update_blocked
                 passes += res.passes
+                dup_dropped += res.dedup_dropped
+                dup_merged += res.dedup_merged
                 skipped += res.skipped_small
                 candidates += res.candidates
     except ChatBackendError as exc:
@@ -678,6 +681,9 @@ def _cmd_consolidate(settings: Settings, args: argparse.Namespace) -> int:
         print(f"  ({passes} extract passes: long sessions were read in several windows)")
     if skipped:
         print(f"  ({skipped} session(s) below the one-off gate — left for later)")
+    if dup_dropped or dup_merged:
+        print(f"  (near-duplicate check: {dup_dropped} dropped as restating an existing lesson, "
+              f"{dup_merged} merged into one)")
     return 0
 
 

@@ -168,6 +168,31 @@ DEPRECATE_SCHEMA = {
     "required": ["reasoning", "contradiction_quote", "contradicts"],
 }
 
+# Insert-time near-duplicate check. Reading whole sessions yields more candidates, and the judge
+# often files one as `new` although an existing lesson already states it. Similarity alone
+# cannot decide (eval 2026-11-03: true duplicates scored 0.68-0.79, unrelated neighbours up to
+# 0.88), so any `new` whose nearest live lesson is >= ``DEDUP_MIN_SIMILARITY`` gets one question.
+DEDUP_MIN_SIMILARITY = 0.65
+DEDUP_SYSTEM = (
+    "You check whether a newly learned lesson is already in a knowledge base. EXISTING is a "
+    "stored lesson; CANDIDATE is new. Decide whether CANDIDATE is the same lesson as EXISTING — "
+    "the same core rule, fact or correction, possibly reworded, narrower, or a special case of "
+    "it. If it is, decide whether CANDIDATE adds a durable, specific fact that EXISTING lacks; if "
+    "so, write a merged statement and detail that keep EXISTING's core claim word-for-word where "
+    "possible and add the new fact. Think it through in `reasoning` first, then answer."
+)
+DEDUP_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "reasoning": {"type": "string"},
+        "same_lesson": {"type": "boolean"},
+        "adds_new_fact": {"type": "boolean"},
+        "merged_statement": {"type": "string"},
+        "merged_detail": {"type": "string"},
+    },
+    "required": ["reasoning", "same_lesson", "adds_new_fact", "merged_statement", "merged_detail"],
+}
+
 CONSOLIDATE_ACTIONS = ("new", "update", "supersede", "deprecate", "drop")
 
 CONSOLIDATE_SCHEMA = {
@@ -198,6 +223,8 @@ class ConsolidateResult:
     # such candidate is stored as a new lesson instead, so it is also counted in ``created``.
     update_blocked: int = 0
     deprecate_blocked: int = 0  # retirements refused (no verifiable contradiction); stored as new
+    dedup_dropped: int = 0  # `new` candidates found to restate an existing lesson; not stored
+    dedup_merged: int = 0  # `new` candidates that added a fact; merged into the existing lesson
     passes: int = 0  # extract passes run (a long session is split into several)
     skipped_small: bool = False  # below the one-off gate; turns left un-consolidated to accumulate
     chunks_consolidated: int = 0
@@ -226,6 +253,7 @@ def consolidate_candidate(
     scope: str | None,
     source_anchors: list[dict] | None,
     result: ConsolidateResult,
+    dedup_min_similarity: float = DEDUP_MIN_SIMILARITY,
 ) -> None:
     """Apply one candidate as new / update / supersede / deprecate / drop against existing lessons.
 
@@ -235,8 +263,9 @@ def consolidate_candidate(
     Both are counted on the result rather than logged away, since a candidate that vanishes without
     a trace is indistinguishable from one that was never extracted.
     """
-    matches = _nearest_learnings(store, embedder, candidate["statement"], scope)
-    decision = _decide(chat, candidate, matches) if matches else {"action": "new"}
+    matches, sims = _nearest_learnings(store, embedder, candidate["statement"], scope)
+    decision = _decide(chat, candidate, matches, sims) if matches else {"action": "new"}
+    fallback = False  # True once a refused update/retirement falls through to "store as new"
     action = decision.get("action", "new")
     log.debug(
         "judge %s (target %s) for %r: %s",
@@ -274,6 +303,7 @@ def consolidate_candidate(
         # Refused: keep the old lesson live and store the candidate in its own words.
         log.info("blocked retirement of learning #%s: no verifiable contradiction", target_id)
         result.deprecate_blocked += 1
+        fallback = True
         statement = candidate["statement"]
         detail = candidate.get("detail")
         importance = normalize_importance(candidate.get("importance", 0.5))
@@ -303,10 +333,19 @@ def consolidate_candidate(
             lost or "its core claim",
         )
         result.update_blocked += 1
+        fallback = True
         statement = candidate["statement"]
         detail = candidate.get("detail")
         importance = normalize_importance(candidate.get("importance", 0.5))
         action = "new"
+
+    if action != "supersede" and not fallback and dedup_min_similarity > 0:
+        near = [m for m in matches
+                if m.is_live and sims.get(m.learning_id, 0.0) >= dedup_min_similarity]
+        if near:
+            best = max(near, key=lambda m: sims[m.learning_id])
+            if _dedup_into(store, embedder, chat, best, candidate, source_anchors, result):
+                return
 
     new_id = add_learning(
         store,
@@ -336,6 +375,7 @@ def consolidate_session(
     scope: str | None = None,
     min_turns: int = 0,
     min_chars: int = 0,
+    dedup_min_similarity: float = DEDUP_MIN_SIMILARITY,
 ) -> ConsolidateResult:
     """Distil one chat document's un-consolidated turns into learnings; idempotent on re-run.
 
@@ -364,7 +404,8 @@ def consolidate_session(
         for cand in candidates:
             anchors = [{"transcript_path": path, "line": t["line"]} for t in turns[:3]]
             consolidate_candidate(
-                store, embedder, chat, cand, scope=scope, source_anchors=anchors, result=result
+                store, embedder, chat, cand, scope=scope, source_anchors=anchors, result=result,
+                dedup_min_similarity=dedup_min_similarity,
             )
         store.mark_consolidated(h.chunk_id for h in window)
         result.chunks_consolidated += len(window)
@@ -390,7 +431,7 @@ def _windows(chunks: list) -> list[list]:
 
 def _nearest_learnings(
     store: Store, embedder: Embedder, statement: str, scope: str | None
-) -> list[Learning]:
+) -> tuple[list[Learning], dict[int, float]]:
     """Nearest ``kind='learning'`` matches: up to ``_MATCH_POOL`` live + ``_MATCH_RETIRED`` retired.
 
     Retired lessons are fetched with ``include_retired=True`` *and* budgeted separately, so showing
@@ -401,10 +442,12 @@ def _nearest_learnings(
     hits = store.search_vec(vec, k=over_fetch, kind="learning", include_retired=True)
     live: list[Learning] = []
     retired: list[Learning] = []
+    sims: dict[int, float] = {}
     for h in hits:
         learning = store.learning_by_doc_id(h.doc_id)
         if learning is None:
             continue
+        sims.setdefault(learning.learning_id, round(1.0 - float(h.distance), 3))
         if scope is not None and learning.scope not in (scope, None):
             continue
         if learning.is_live:
@@ -412,11 +455,13 @@ def _nearest_learnings(
                 live.append(learning)
         elif len(retired) < _MATCH_RETIRED:
             retired.append(learning)
-    return live + retired
+    return live + retired, sims
 
 
-def _decide(chat: ChatModel, candidate: dict, matches: list[Learning]) -> dict:
-    listing = "\n".join(_describe_match(m) for m in matches)
+def _decide(
+    chat: ChatModel, candidate: dict, matches: list[Learning], sims: dict[int, float] | None = None
+) -> dict:
+    listing = "\n".join(_describe_match(m, (sims or {}).get(m.learning_id)) for m in matches)
     user = (
         f"NEW candidate lesson:\n[{candidate['type']}] {candidate['statement']}"
         + (f"\ndetail: {candidate['detail']}" if candidate.get("detail") else "")
@@ -464,6 +509,60 @@ def _merge_preserves(
     return True, ""
 
 
+def _dedup_into(
+    store: Store,
+    embedder: Embedder,
+    chat: ChatModel,
+    existing: Learning,
+    candidate: dict,
+    source_anchors: list[dict] | None,
+    result: ConsolidateResult,
+) -> bool:
+    """Ask whether ``candidate`` restates ``existing``; drop or merge it. True = handled (not new).
+
+    Not the same lesson (or an unusable reply) -> False, and the candidate is stored as new, so a
+    broken check never loses a lesson. Same lesson adding nothing -> dropped. Same lesson adding a
+    fact -> merged into ``existing`` through the verbatim-quote merge check; if that merge would
+    lose the existing claim, the candidate is dropped and ``existing`` stays intact.
+    """
+
+    def text(s: str, d: str | None) -> str:
+        return s + (f"\ndetail: {d}" if d else "")
+
+    reply = chat.complete_json(
+        DEDUP_SYSTEM,
+        f"EXISTING:\n{text(existing.statement, existing.detail)}"
+        f"\n\nCANDIDATE:\n{text(candidate['statement'], candidate.get('detail'))}",
+        schema=DEDUP_SCHEMA,
+    )
+    if reply.get("same_lesson") is not True:
+        return False
+    stmt = str(reply.get("merged_statement") or "").strip()
+    detail = str(reply.get("merged_detail") or "").strip() or None
+    if reply.get("adds_new_fact") is not True or not stmt:
+        log.info("dropped candidate %r: restates learning #%s",
+                 candidate["statement"][:80], existing.learning_id)
+        result.dedup_dropped += 1
+        return True
+    keeps, why = _merge_preserves(chat, existing, stmt, detail, candidate)
+    if not keeps:
+        log.info("dropped candidate %r: same as #%s but the merge would lose its claim (%s)",
+                 candidate["statement"][:80], existing.learning_id, why)
+        result.dedup_dropped += 1
+        return True
+    patch: dict = {"statement": stmt}
+    if detail:
+        patch["detail"] = detail
+    if source_anchors:
+        patch["source_anchors"] = json.dumps(source_anchors)
+    store.update_learning(existing.learning_id, **patch, revision_reason="consolidate:dedup-merge")
+    reembed_learning(store, embedder, existing.learning_id)
+    result.updated += 1
+    result.dedup_merged += 1
+    result.learning_ids.append(existing.learning_id)
+    return True
+
+
 def _contradiction_verified(chat: ChatModel, target: Learning, candidate: dict) -> bool:
     """True only if the judge quotes a span of the candidate that contradicts ``target``.
 
@@ -486,9 +585,19 @@ def _norm(s: str) -> str:
     return " ".join(s.lower().replace("`", "").replace('"', "").replace("'", "").split())
 
 
-def _describe_match(m: Learning) -> str:
-    """One prompt line for a candidate's neighbour, flagged ``[RETIRED: why]`` when not live."""
-    line = f"- id={m.learning_id} [{m.type}] {m.statement}"
+def _describe_match(m: Learning, sim: float | None = None) -> str:
+    """One prompt line for a candidate's neighbour, flagged ``[RETIRED: why]`` when not live.
+
+    Similarity and provenance help the judge tell a restatement from a related-but-different lesson
+    (eval: without them it re-filed existing lessons as `new`).
+    """
+    meta = [f"similarity {sim:.2f}"] if sim is not None else []
+    meta.append(f"created {str(m.created_at)[:10]}")
+    if str(m.updated_at)[:10] != str(m.created_at)[:10]:
+        meta.append(f"updated {str(m.updated_at)[:10]}")
+    if m.reuse_count:
+        meta.append(f"recalled {m.reuse_count}x")
+    line = f"- id={m.learning_id} [{m.type}] ({'; '.join(meta)}) {m.statement}"
     if m.detail:
         line += f" ({m.detail})"
     if not m.is_live:
