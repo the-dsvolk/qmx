@@ -15,6 +15,12 @@ lesson: retired lessons are hidden from search, so unless they are shown to the 
 (``include_retired=True`` in :func:`_nearest_learnings`) it sees no match and re-adds the lesson as
 ``new``, quietly undoing the retirement one session later.
 
+Both actions that retire a live lesson — ``supersede`` and ``deprecate`` — must first pass the
+retirement guardrail (:func:`_contradiction_verified`): the judge quotes the span of the candidate
+that contradicts the old lesson, and code checks the quote is really there. A refused ``deprecate``
+stores the candidate as new; a refused ``supersede`` sends it through the insert-time near-duplicate
+check, since a candidate that does not contradict its target usually restates or extends it.
+
 Both passes go through the :class:`~qmx.chat.ChatModel` seam, so the pipeline is unit-tested with a
 deterministic fake — no live model needed.
 """
@@ -160,9 +166,13 @@ PRESERVE_SCHEMA = {
     ],
 }
 
-# Retirement guardrail. `deprecate` hides a lesson; the judge has retired lessons it itself called
-# correct (#380, three times across eval runs). Before retiring, the judge must quote the part of
-# the CANDIDATE that contradicts the old lesson; code checks the quote really is in the candidate.
+# Retirement guardrail. `deprecate` and `supersede` both hide a live lesson, and judges have retired
+# lessons the session supported (#380 three times by deprecate across eval runs; in the 2026-11-04
+# end-to-end eval, three valid lessons by supersede, #380 among them). Before retiring, the judge
+# must quote the part of the CANDIDATE that contradicts the old lesson; code checks the quote really
+# is in the candidate. One prompt serves both actions: a supersede may only retire OLD because the
+# candidate makes it stale ("contradicts or obsoletes"); a candidate that adds detail to or narrows
+# OLD is an update, not a supersede.
 DEPRECATE_SYSTEM = (
     "You review a proposal to RETIRE an existing engineering lesson as wrong or obsolete. OLD is "
     "the lesson; CANDIDATE is what was just learned. Copy, verbatim, the shortest span of "
@@ -236,6 +246,10 @@ class ConsolidateResult:
     # such candidate is stored as a new lesson instead, so it is also counted in ``created``.
     update_blocked: int = 0
     deprecate_blocked: int = 0  # retirements refused (no verifiable contradiction); stored as new
+    # `supersede`s refused by the same check: the target stays live and the candidate goes through
+    # the near-duplicate check as a `new` one, so it is also counted in ``created``,
+    # ``dedup_dropped`` or ``dedup_merged``.
+    supersede_blocked: int = 0
     dedup_dropped: int = 0  # `new` candidates found to restate an existing lesson; not stored
     dedup_merged: int = 0  # `new` candidates that added a fact; merged into the existing lesson
     passes: int = 0  # extract passes run (a long session is split into several)
@@ -279,10 +293,19 @@ def consolidate_candidate(
     merely re-learns an already-retired lesson, so retirement is not silently undone next session.
     Both are counted on the result rather than logged away, since a candidate that vanishes without
     a trace is indistinguishable from one that was never extracted.
+
+    ``supersede`` and ``deprecate`` retire a live lesson only after the judge quotes, verbatim, the
+    span of the candidate that contradicts it (:func:`_contradiction_verified`). A refused
+    ``deprecate`` stores the candidate as new. A refused ``supersede`` is treated as a ``new``
+    candidate *including* the near-duplicate check: the judge linked it to the target and found no
+    contradiction, so it most likely restates or extends that lesson and should be dropped or
+    merged rather than stored as a blind duplicate.
     """
     matches, sims = _nearest_learnings(store, embedder, candidate["statement"], scope)
     decision = _decide(chat, candidate, matches, sims, result) if matches else {"action": "new"}
-    fallback = False  # True once a refused update/retirement falls through to "store as new"
+    # True once a refused update/deprecate falls through to "store as new" (no near-duplicate check;
+    # a refused supersede does not set it, so its candidate still gets that check).
+    fallback = False
     action = decision.get("action", "new")
     log.debug(
         "judge %s (target %s) for %r: %s",
@@ -359,6 +382,21 @@ def consolidate_candidate(
         detail = candidate.get("detail")
         importance = normalize_importance(candidate.get("importance", 0.5))
         action = "new"
+
+    if action == "supersede" and _valid_target(target_id, matches):
+        target = next(m for m in matches if m.learning_id == target_id)
+        if not _contradiction_verified(chat, target, candidate, result):
+            # Refused: keep the old lesson live. No `fallback` on purpose — the candidate goes
+            # through the near-duplicate check below, which drops or merges it if it restates a
+            # live lesson (normally the target), and otherwise stores it in its own words (not the
+            # judge's replacement text, which was written to stand in for the target).
+            log.info("blocked supersede of learning #%s: no verifiable contradiction; checking "
+                     "the candidate as new", target_id)
+            result.supersede_blocked += 1
+            statement = candidate["statement"]
+            detail = candidate.get("detail")
+            importance = normalize_importance(candidate.get("importance", 0.5))
+            action = "new"
 
     if action != "supersede" and not fallback and dedup_min_similarity > 0:
         near = [m for m in matches
@@ -638,8 +676,8 @@ def _contradiction_verified(
 ) -> bool:
     """True only if the judge quotes a span of the candidate that contradicts ``target``.
 
-    The quote is checked against the candidate's text in code; an unusable reply fails safe (the
-    lesson stays live).
+    The gate for both retiring actions, ``deprecate`` and ``supersede``. The quote is checked
+    against the candidate's text in code; an unusable reply fails safe (the lesson stays live).
     """
     cand_text = candidate["statement"] + (
         f"\ndetail: {candidate['detail']}" if candidate.get("detail") else ""
