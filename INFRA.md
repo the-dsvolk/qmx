@@ -204,8 +204,15 @@ export OLLAMA_HOST=127.0.0.1:11434
   marked when done (previously only the first 200 turns were ever read). `consolidate_min_turns` (8)
   and `consolidate_min_chars` (4000) skip one-off sessions, leaving them to accumulate.
 - **Merge & retirement guardrails.** An `update` must quote, verbatim, where the old lesson's core
-  claim survives (checked in code); a `deprecate` must quote the part of the new lesson that
-  contradicts the old one. Otherwise the candidate is stored as new and the old lesson stays intact.
+  claim survives (checked in code); a `deprecate` or `supersede` must quote the part of the new
+  lesson that contradicts the old one. Otherwise (an unusable reply included) the old lesson stays
+  intact: a refused `update`/`deprecate` stores the candidate as new; a refused `supersede` sends it
+  through the near-duplicate check, which drops or merges it if it restates a live lesson and
+  otherwise stores it as new in its own words. `qmx consolidate` reports blocked supersedes.
+  Supersede was unguarded until a 2026-11-04 end-to-end eval caught it retiring three lessons the
+  sessions supported (#1852, #380, #1142). Replayed through the check, the production judge blocks
+  #380 but still "verifies" #1852 and #1142 with a real but non-contradicting quote, so the shared
+  prompt is a first line, not a complete fix; a stricter supersede prompt is a follow-up.
 - **Reasoning-first JSON.** Both judge schemas start with a required `reasoning` string, so the
   model analyses before it decides (thinking stays off). Eval 2026-11-02, 12 sessions blind-graded:
   precision 3.8 vs 3.3/5, +46% judge time, no call over 60 s; Ollama thinking mode was ~10× slower.

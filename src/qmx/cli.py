@@ -639,7 +639,7 @@ def _cmd_consolidate(settings: Settings, args: argparse.Namespace) -> int:
 
             created = updated = superseded = candidates = 0
             deprecated = dropped = blocked = passes = skipped = dup_dropped = dup_merged = 0
-            unusable = failed_passes = 0
+            unusable = failed_passes = supersede_blocked = 0
             for doc_id in targets:
                 res = consolidate_session(
                     store, embedder, chat, doc_id, scope=args.scope,
@@ -653,6 +653,7 @@ def _cmd_consolidate(settings: Settings, args: argparse.Namespace) -> int:
                 deprecated += res.deprecated
                 dropped += res.dropped
                 blocked += res.update_blocked
+                supersede_blocked += res.supersede_blocked
                 passes += res.passes
                 dup_dropped += res.dedup_dropped
                 dup_merged += res.dedup_merged
@@ -681,6 +682,9 @@ def _cmd_consolidate(settings: Settings, args: argparse.Namespace) -> int:
     if blocked:
         print(f"  ({blocked} update(s) blocked by the merge guardrail — stored as new instead; "
               "-v for which)")
+    if supersede_blocked:
+        print(f"  ({supersede_blocked} supersede(s) blocked by the retirement guardrail — old "
+              "lesson kept live, candidate sent through the near-duplicate check; -v for which)")
     if passes > len(targets) - skipped:
         print(f"  ({passes} extract passes: long sessions were read in several windows)")
     if skipped:
