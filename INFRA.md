@@ -185,6 +185,21 @@ export OLLAMA_HOST=127.0.0.1:11434
   12 sessions (2026-11-03), ~2 min/session. If the judge is unreachable, consolidation is **deferred**,
   not lost: a pass is only marked consolidated when it finishes, and the nightly `qmx consolidate
   --all` (launchd, 03:00) picks the turns up. Rollback is config-only (`chat_backend = "ollama"`).
+- **Fixed JSON layout and unusable replies (vLLM judge).** With `response_format`, vLLM's grammar
+  allows any whitespace between JSON tokens. When the judge writes an unescaped `"` in a text field,
+  the string closes early and greedy decoding emits newlines until the token cap: roughly 1 in 50-100
+  real calls, and on 2026-11-03 one such merge check (retried 5 x 300 s) deferred a whole `--all`.
+  Every judge prompt now asks for single quotes inside values, and decisions/checks are capped at
+  3072 output tokens. `chat_json_layout = "indent"` (opt-in; default `"schema"` = `response_format`)
+  sends a per-request grammar admitting exactly `json.dumps(indent=2)`, which removes the loop
+  entirely; it stays off until its decoding speed matches xgrammar's own EBNF (3-5x slower in a
+  2026-11-04 check).
+  An unusable reply (cut off at the cap, no reply before the timeout while `/models` still answers,
+  or not JSON) fails safe for that one call: decision -> stored as new, merge/retirement check ->
+  refused, dedup check -> candidate kept, extract -> its pass stays queued. Three unusable replies in
+  a row, or an unreachable judge, still defer the run. Don't use vLLM's server-wide
+  `disable_any_whitespace` instead: it forces compact JSON and corrupted fields
+  (`statement: ',detail'`). Evidence: `~/knowledge/qwen-judge-eval/runaway-debug/`.
 - **Long sessions & one-off gate.** Sessions are read in passes of ≤200 turns / ≤100K characters, each
   marked when done (previously only the first 200 turns were ever read). `consolidate_min_turns` (8)
   and `consolidate_min_chars` (4000) skip one-off sessions, leaving them to accumulate.

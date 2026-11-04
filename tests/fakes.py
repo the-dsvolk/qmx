@@ -6,6 +6,8 @@ import hashlib
 import re
 from pathlib import Path
 
+from qmx.chat import ChatReplyError
+
 # Drop punctuation-glued tokens down to word cores, and ignore very common/short words so that
 # cosine overlap reflects *content* words — a crude but realistic stand-in for real preprocessing.
 _WORD = re.compile(r"[a-z0-9]+")
@@ -65,6 +67,7 @@ class FakeChat:
         checks: list[dict] | None = None,
         retire_checks: list[dict] | None = None,
         dup_checks: list[dict] | None = None,
+        unusable: dict[str, int] | None = None,
     ) -> None:
         self._extractions = list(extractions or [])
         self._decisions = list(decisions or [])
@@ -76,8 +79,19 @@ class FakeChat:
         self.retire_prompts: list[str] = []
         self._dup_checks = list(dup_checks or [])
         self.dup_prompts: list[str] = []
+        # ``unusable`` = {kind: n}: the next n calls of that kind ("extract", "decision", "merge",
+        # "dedup", "retire") raise ChatReplyError. ``calls`` logs (kind, max_tokens) per call.
+        self._unusable = dict(unusable or {})
+        self.calls: list[tuple[str, int | None]] = []
 
-    def complete_json(self, system: str, user: str, schema: dict | None = None) -> dict:
+    def complete_json(
+        self, system: str, user: str, schema: dict | None = None, *, max_tokens: int | None = None
+    ) -> dict:
+        kind = _call_kind(system)
+        self.calls.append((kind, max_tokens))
+        if self._unusable.get(kind, 0) > 0:  # scripted unusable reply (cut off / runaway)
+            self._unusable[kind] -= 1
+            raise ChatReplyError(f"scripted unusable {kind} reply")
         if "distill" in system:  # EXTRACT_SYSTEM
             learnings = self._extractions.pop(0) if self._extractions else []
             return {"learnings": learnings}
@@ -102,6 +116,18 @@ class FakeChat:
             return {"contradicts": True, "contradiction_quote": cand}
         self.decision_prompts.append(user)
         return self._decisions.pop(0) if self._decisions else {"action": "new"}
+
+
+def _call_kind(system: str) -> str:
+    if "distill" in system:
+        return "extract"
+    if "audit" in system:
+        return "merge"
+    if "already in a knowledge base" in system:
+        return "dedup"
+    if "proposal to RETIRE" in system:
+        return "retire"
+    return "decision"
 
 
 def build_index(tmp_path: Path, embedder: FakeEmbedder, files: dict[str, str]):
