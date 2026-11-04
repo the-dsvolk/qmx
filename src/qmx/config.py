@@ -31,6 +31,7 @@ _ENV_MAP = {
     "QMX_CHAT_URL": "chat_url",
     "QMX_CHAT_API_KEY": "chat_api_key",
     "QMX_CHAT_MAX_TOKENS": "chat_max_tokens",
+    "QMX_DEDUP_MIN_SIMILARITY": "dedup_min_similarity",
     "QMX_CONSOLIDATE_MIN_TURNS": "consolidate_min_turns",
     "QMX_CONSOLIDATE_MIN_CHARS": "consolidate_min_chars",
     "QMX_MCP_HOST": "mcp_host",
@@ -94,6 +95,9 @@ class Settings:
     # than this are skipped (and left un-consolidated so a resumed session can accumulate).
     consolidate_min_turns: int = 8
     consolidate_min_chars: int = 4000
+    # Insert-time near-duplicate check: a `new` lesson whose nearest live lesson is at least this
+    # similar gets one "same lesson?" question (drop / merge / keep). 0 disables it.
+    dedup_min_similarity: float = 0.65
 
     # Reranker: base URL of a Cohere-style /v1/rerank server (llama.cpp llama-server --reranking).
     # Empty = disabled (RRF-only). e.g. "http://spark-0e81.local:8081".
@@ -181,6 +185,6 @@ def _coerce_value(name: str, raw: object) -> object:
         "chat_num_ctx", "consolidate_min_turns", "consolidate_min_chars", "chat_max_tokens",
     }:
         return int(raw)
-    if name in {"request_timeout", "retry_base_delay", "chat_timeout"}:
+    if name in {"request_timeout", "retry_base_delay", "chat_timeout", "dedup_min_similarity"}:
         return float(raw)
     return str(raw)

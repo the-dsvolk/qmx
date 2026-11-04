@@ -18,6 +18,7 @@ def test_defaults():
     assert s.chat_think == "false"
     assert (s.consolidate_min_turns, s.consolidate_min_chars) == (8, 4000)
     assert (s.chat_backend, s.chat_url, s.chat_max_tokens) == ("ollama", "", 8192)
+    assert s.dedup_min_similarity == 0.65
 
 
 def test_judge_settings_from_env():

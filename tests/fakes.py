@@ -64,6 +64,7 @@ class FakeChat:
         decisions: list[dict] | None = None,
         checks: list[dict] | None = None,
         retire_checks: list[dict] | None = None,
+        dup_checks: list[dict] | None = None,
     ) -> None:
         self._extractions = list(extractions or [])
         self._decisions = list(decisions or [])
@@ -73,6 +74,8 @@ class FakeChat:
         self.check_prompts: list[str] = []
         self._retire_checks = list(retire_checks or [])
         self.retire_prompts: list[str] = []
+        self._dup_checks = list(dup_checks or [])
+        self.dup_prompts: list[str] = []
 
     def complete_json(self, system: str, user: str, schema: dict | None = None) -> dict:
         if "distill" in system:  # EXTRACT_SYSTEM
@@ -86,6 +89,9 @@ class FakeChat:
             new = user.split("NEW:\n", 1)[1].split("\n", 1)[0] if "NEW:\n" in user else ""
             return {"preserves": True, "evidence_in_new": new, "unsupported_additions": [],
                     "lost": ""}
+        if "already in a knowledge base" in system:  # DEDUP_SYSTEM (near-duplicate check)
+            self.dup_prompts.append(user)
+            return self._dup_checks.pop(0) if self._dup_checks else {"same_lesson": False}
         if "proposal to RETIRE" in system:  # DEPRECATE_SYSTEM (retirement guardrail)
             self.retire_prompts.append(user)
             if self._retire_checks:
