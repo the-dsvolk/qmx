@@ -179,6 +179,18 @@ export OLLAMA_HOST=127.0.0.1:11434
   keeps only about half the window, so long sessions were judged on 26-46% of their turns. 64K costs
   the same memory (23 GB) and speed. The judge waits up to `chat_timeout` (default **300 s**);
   `request_timeout` (60 s) stays short because it also bounds the synchronous Stop-hook embed.
+- **Judge on vLLM (second spark).** Set `chat_backend = "openai"`, `chat_url =
+  "http://spark-0f50.local:8000/v1"`, `chat_model = "qwen3.8-judge"` to use Qwen3.8-27B NVFP4 + DFlash2
+  served by vLLM (thinking off, reasoning-first JSON) — blind-graded 6.3 vs 5.1/10 against qwen3.6 on
+  12 sessions (2026-11-03), ~2 min/session. If the judge is unreachable, consolidation is **deferred**,
+  not lost: a pass is only marked consolidated when it finishes, and the nightly `qmx consolidate
+  --all` (launchd, 03:00) picks the turns up. Rollback is config-only (`chat_backend = "ollama"`).
+- **Long sessions & one-off gate.** Sessions are read in passes of ≤200 turns / ≤100K characters, each
+  marked when done (previously only the first 200 turns were ever read). `consolidate_min_turns` (8)
+  and `consolidate_min_chars` (4000) skip one-off sessions, leaving them to accumulate.
+- **Merge & retirement guardrails.** An `update` must quote, verbatim, where the old lesson's core
+  claim survives (checked in code); a `deprecate` must quote the part of the new lesson that
+  contradicts the old one. Otherwise the candidate is stored as new and the old lesson stays intact.
 - **Reasoning-first JSON.** Both judge schemas start with a required `reasoning` string, so the
   model analyses before it decides (thinking stays off). Eval 2026-11-02, 12 sessions blind-graded:
   precision 3.8 vs 3.3/5, +46% judge time, no call over 60 s; Ollama thinking mode was ~10× slower.

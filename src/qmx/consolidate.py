@@ -38,7 +38,10 @@ from qmx.store import Learning, Store
 
 log = logging.getLogger("qmx.consolidate")
 
-_MAX_TURNS = 200  # cap how many turns feed one extract pass (keeps the prompt bounded)
+_MAX_TURNS = 200  # max turns per extract pass (a long session takes several passes)
+# Max transcript characters per extract pass (~30K tokens): fits the judge's 64K window with room
+# for the reply/thinking, and keeps each pass focused enough for the model to read it all.
+_MAX_PASS_CHARS = 100_000
 _MATCH_POOL = 5  # live lessons shown to the supersede judge per candidate
 # Retired lessons are shown too — otherwise the judge cannot tell a genuinely new lesson from one
 # that was deliberately retired, and would re-add it as `new` on the next session (see `drop`).
@@ -49,6 +52,13 @@ EXTRACT_SYSTEM = (
     "You distill durable, reusable engineering lessons from a coding session transcript. "
     "Keep only lessons worth recalling next time: a decision and why, a mistake and its "
     "correction, or a repeatable how-to. Drop chit-chat, one-offs, and restated context. "
+    "A one-off lookup, status check or Q&A with no reusable insight has no lessons: return an "
+    "empty list. Write each lesson so it is reusable beyond this session: drop scenario-specific "
+    "values (balances, dates, deadlines, one-off task status) and first-person narrative, but "
+    "keep the concrete commands, settings, thresholds and names that make it actionable. State "
+    "only what "
+    "the transcript supports and keep its hedges (never turn \"generally\" or \"usually\" into "
+    "\"always\"). "
     "Each lesson: a crisp one-sentence `statement`, a `detail` (the why/correction/better way), "
     "a `type` (decision|mistake|howto), a short `topic` slug, and an `importance` as a decimal "
     "between 0.0 and 1.0 (e.g. 0.8 — NOT a 1-5 or 1-10 rating). "
@@ -71,7 +81,9 @@ CONSOLIDATE_SYSTEM = (
     "retired on purpose: never `update`, `supersede` or `deprecate` them. "
     "Return JSON {action, target_id, statement, detail, importance, reason}. "
     "Before deciding, think it through in the `reasoning` field: compare the candidate with each "
-    "existing lesson (same lesson? corrects it? unrelated?). Then fill the remaining fields."
+    "existing lesson (same lesson? corrects it? unrelated?). Then fill the remaining fields. "
+    "`statement` and `detail` must contain only the lesson itself — never commentary about other "
+    "lessons, their ids, or why you chose the action (that belongs in `reasoning`)."
 )
 
 # ``reasoning`` is the FIRST property of both schemas on purpose: Ollama turns the schema into a
@@ -111,20 +123,49 @@ EXTRACT_SCHEMA = {
 # Validated 2026-11-02 on 30 real merges: caught all 7 the blind graders flagged as clobbers.
 PRESERVE_SYSTEM = (
     "You audit one edit to a knowledge base of engineering lessons. OLD is an existing lesson; "
-    "NEW is the text proposed to REPLACE it. Decide whether NEW still states OLD's core claim — "
-    "its main rule, fact or correction — possibly reworded, narrowed slightly, or extended with "
-    "new detail. If OLD's core claim is missing, contradicted, or NEW is really about a different "
-    "subject, it does NOT preserve it. Think it through in `reasoning` first, then answer."
+    "NEW is the text proposed to REPLACE it; CANDIDATE is the newly learned lesson that motivated "
+    "the edit. First state OLD's core claim (its main rule, fact or correction) in one sentence. "
+    "Then copy, verbatim, the shortest span of NEW that states that same claim — leave it empty "
+    "if NEW does not state it. List every fact in NEW that appears in neither OLD nor CANDIDATE. "
+    "NEW preserves OLD only if it still states OLD's core claim and is not really about a "
+    "different subject. Think it through in `reasoning` first, then answer."
 )
 
 PRESERVE_SCHEMA = {
     "type": "object",
     "properties": {
         "reasoning": {"type": "string"},
+        "old_core_claim": {"type": "string"},
+        "evidence_in_new": {"type": "string"},
+        "unsupported_additions": {"type": "array", "items": {"type": "string"}},
         "preserves": {"type": "boolean"},
         "lost": {"type": "string"},
     },
-    "required": ["reasoning", "preserves", "lost"],
+    "required": [
+        "reasoning", "old_core_claim", "evidence_in_new", "unsupported_additions", "preserves",
+        "lost",
+    ],
+}
+
+# Retirement guardrail. `deprecate` hides a lesson; the judge has retired lessons it itself called
+# correct (#380, three times across eval runs). Before retiring, the judge must quote the part of
+# the CANDIDATE that contradicts the old lesson; code checks the quote really is in the candidate.
+DEPRECATE_SYSTEM = (
+    "You review a proposal to RETIRE an existing engineering lesson as wrong or obsolete. OLD is "
+    "the lesson; CANDIDATE is what was just learned. Copy, verbatim, the shortest span of "
+    "CANDIDATE that contradicts or obsoletes OLD — leave it empty if CANDIDATE does not actually "
+    "contradict OLD (adding detail, narrowing it, or agreeing with it is NOT a contradiction). "
+    "Think it through in `reasoning` first, then answer."
+)
+
+DEPRECATE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "reasoning": {"type": "string"},
+        "contradiction_quote": {"type": "string"},
+        "contradicts": {"type": "boolean"},
+    },
+    "required": ["reasoning", "contradiction_quote", "contradicts"],
 }
 
 CONSOLIDATE_ACTIONS = ("new", "update", "supersede", "deprecate", "drop")
@@ -156,6 +197,9 @@ class ConsolidateResult:
     # `update`s refused by the merge guardrail (the merge would lose the target's core claim); each
     # such candidate is stored as a new lesson instead, so it is also counted in ``created``.
     update_blocked: int = 0
+    deprecate_blocked: int = 0  # retirements refused (no verifiable contradiction); stored as new
+    passes: int = 0  # extract passes run (a long session is split into several)
+    skipped_small: bool = False  # below the one-off gate; turns left un-consolidated to accumulate
     chunks_consolidated: int = 0
     learning_ids: list[int] = field(default_factory=list)
 
@@ -220,15 +264,24 @@ def consolidate_candidate(
         return
 
     if action == "deprecate" and _valid_target(target_id, matches):
-        reason = decision.get("reason") or f"contradicted while learning: {statement}"
-        deprecate_learning(store, target_id, reason=reason)
-        log.info("deprecated learning #%s: %s", target_id, reason)
-        result.deprecated += 1
-        return
+        target = next(m for m in matches if m.learning_id == target_id)
+        if _contradiction_verified(chat, target, candidate):
+            reason = decision.get("reason") or f"contradicted while learning: {statement}"
+            deprecate_learning(store, target_id, reason=reason)
+            log.info("deprecated learning #%s: %s", target_id, reason)
+            result.deprecated += 1
+            return
+        # Refused: keep the old lesson live and store the candidate in its own words.
+        log.info("blocked retirement of learning #%s: no verifiable contradiction", target_id)
+        result.deprecate_blocked += 1
+        statement = candidate["statement"]
+        detail = candidate.get("detail")
+        importance = normalize_importance(candidate.get("importance", 0.5))
+        action = "new"
 
     if action == "update" and _valid_target(target_id, matches):
         target = next(m for m in matches if m.learning_id == target_id)
-        keeps, lost = _merge_preserves(chat, target, statement, detail)
+        keeps, lost = _merge_preserves(chat, target, statement, detail, candidate)
         if keeps:
             # Only pass what the merge actually produced: in `update_learning` a ``None`` *clears*
             # the column, so an absent detail/anchors must be omitted rather than sent as None.
@@ -281,28 +334,58 @@ def consolidate_session(
     doc_id: int,
     *,
     scope: str | None = None,
+    min_turns: int = 0,
+    min_chars: int = 0,
 ) -> ConsolidateResult:
-    """Distil one chat document's un-consolidated turns into learnings; idempotent on re-run."""
+    """Distil one chat document's un-consolidated turns into learnings; idempotent on re-run.
+
+    Long sessions are read in several passes (``_MAX_TURNS`` turns / ``_MAX_PASS_CHARS``
+    characters each), and each pass's turns are marked consolidated only once that pass is done —
+    previously only the first 200 turns were read while *all* were marked, so the rest of a long
+    session was silently never distilled. ``min_turns``/``min_chars`` (the CLI passes the
+    ``consolidate_min_*`` settings) skip sessions too small to hold a durable lesson, without
+    marking them, so a resumed session's turns accumulate until they clear the gate.
+    """
     result = ConsolidateResult()
     chunks = store.unconsolidated_chat_chunks(doc_id)
     if not chunks:
         return result
+    if len(chunks) < min_turns or sum(len(h.text) for h in chunks) < min_chars:
+        log.info("skipping doc %s: %d turns below the one-off gate", doc_id, len(chunks))
+        result.skipped_small = True
+        return result
     path = chunks[0].path
-    turns = [
-        {"role": h.symbol or "?", "text": h.text, "line": h.start_line}
-        for h in chunks[:_MAX_TURNS]
-    ]
-    result.turns_read = len(turns)
-    candidates = extract_learnings(chat, turns)
-    result.candidates = len(candidates)
-    for cand in candidates:
-        anchors = [{"transcript_path": path, "line": t["line"]} for t in turns[:3]]
-        consolidate_candidate(
-            store, embedder, chat, cand, scope=scope, source_anchors=anchors, result=result
-        )
-    store.mark_consolidated(h.chunk_id for h in chunks)
-    result.chunks_consolidated = len(chunks)
+    for window in _windows(chunks):
+        turns = [{"role": h.symbol or "?", "text": h.text, "line": h.start_line} for h in window]
+        result.turns_read += len(turns)
+        result.passes += 1
+        candidates = extract_learnings(chat, turns)
+        result.candidates += len(candidates)
+        for cand in candidates:
+            anchors = [{"transcript_path": path, "line": t["line"]} for t in turns[:3]]
+            consolidate_candidate(
+                store, embedder, chat, cand, scope=scope, source_anchors=anchors, result=result
+            )
+        store.mark_consolidated(h.chunk_id for h in window)
+        result.chunks_consolidated += len(window)
     return result
+
+
+def _windows(chunks: list) -> list[list]:
+    """Split turns into extract passes of at most ``_MAX_TURNS`` turns / ``_MAX_PASS_CHARS``."""
+    windows: list[list] = []
+    window: list = []
+    chars = 0
+    for h in chunks:
+        n = len(h.text)
+        if window and (len(window) >= _MAX_TURNS or chars + n > _MAX_PASS_CHARS):
+            windows.append(window)
+            window, chars = [], 0
+        window.append(h)
+        chars += n
+    if window:
+        windows.append(window)
+    return windows
 
 
 def _nearest_learnings(
@@ -343,24 +426,64 @@ def _decide(chat: ChatModel, candidate: dict, matches: list[Learning]) -> dict:
 
 
 def _merge_preserves(
-    chat: ChatModel, target: Learning, statement: str, detail: str | None
+    chat: ChatModel, target: Learning, statement: str, detail: str | None, candidate: dict
 ) -> tuple[bool, str]:
     """Ask the judge whether the merged text still states ``target``'s core claim.
 
-    Returns ``(preserves, what_was_lost)``. Fails safe: an unusable reply counts as *not*
-    preserved, so a broken check costs a possible near-duplicate, never a destroyed lesson.
+    Strict: the judge must quote where the old claim survives, and the quote is checked against
+    the merged text in code (a bare "preserves: true" is not enough — a lenient judge approved
+    every merge it was shown). Facts in the merge that come from neither the old lesson nor the
+    candidate are logged as a warning (not a block). Returns
+    ``(preserves, why_not)``. Fails safe: an unusable reply counts as *not* preserved.
     """
 
     def text(s: str, d: str | None) -> str:
         return s + (f"\ndetail: {d}" if d else "")
 
+    new_text = text(statement, detail)
     reply = chat.complete_json(
         PRESERVE_SYSTEM,
-        f"OLD:\n{text(target.statement, target.detail)}\n\nNEW:\n{text(statement, detail)}",
+        f"OLD:\n{text(target.statement, target.detail)}\n\nNEW:\n{new_text}"
+        f"\n\nCANDIDATE:\n{text(candidate['statement'], candidate.get('detail'))}",
         schema=PRESERVE_SCHEMA,
     )
-    preserves = reply.get("preserves")
-    return (preserves is True), str(reply.get("lost") or "")
+    evidence = str(reply.get("evidence_in_new") or "").strip()
+    quoted = bool(evidence) and _norm(evidence) in _norm(new_text)
+    additions = [str(a) for a in reply.get("unsupported_additions") or [] if str(a).strip()]
+    if reply.get("preserves") is not True:
+        return False, str(reply.get("lost") or "its core claim")
+    if not quoted:
+        return False, "no verbatim evidence that the merged text still states the old claim"
+    if additions:
+        # Logged, not blocked: in a blind review, blocking on additions turned most merges into
+        # near-duplicate NEW lessons (dedup fell 3.67 -> 2.83). The verbatim quote above is what
+        # actually catches a merge that overwrote the old lesson.
+        log.warning("merge into #%s adds facts found in neither lesson: %s",
+                    target.learning_id if hasattr(target, "learning_id") else "?",
+                    "; ".join(additions[:3]))
+    return True, ""
+
+
+def _contradiction_verified(chat: ChatModel, target: Learning, candidate: dict) -> bool:
+    """True only if the judge quotes a span of the candidate that contradicts ``target``.
+
+    The quote is checked against the candidate's text in code; an unusable reply fails safe (the
+    lesson stays live).
+    """
+    cand_text = candidate["statement"] + (
+        f"\ndetail: {candidate['detail']}" if candidate.get("detail") else ""
+    )
+    old_text = target.statement + (f"\ndetail: {target.detail}" if target.detail else "")
+    reply = chat.complete_json(
+        DEPRECATE_SYSTEM, f"OLD:\n{old_text}\n\nCANDIDATE:\n{cand_text}", schema=DEPRECATE_SCHEMA
+    )
+    quote = str(reply.get("contradiction_quote") or "").strip()
+    return reply.get("contradicts") is True and bool(quote) and _norm(quote) in _norm(cand_text)
+
+
+def _norm(s: str) -> str:
+    """Case/whitespace/quote-insensitive form for the verbatim-evidence check."""
+    return " ".join(s.lower().replace("`", "").replace('"', "").replace("'", "").split())
 
 
 def _describe_match(m: Learning) -> str:

@@ -26,6 +26,13 @@ _ENV_MAP = {
     "QMX_CHAT_MODEL": "chat_model",
     "QMX_CHAT_NUM_CTX": "chat_num_ctx",
     "QMX_CHAT_TIMEOUT": "chat_timeout",
+    "QMX_CHAT_THINK": "chat_think",
+    "QMX_CHAT_BACKEND": "chat_backend",
+    "QMX_CHAT_URL": "chat_url",
+    "QMX_CHAT_API_KEY": "chat_api_key",
+    "QMX_CHAT_MAX_TOKENS": "chat_max_tokens",
+    "QMX_CONSOLIDATE_MIN_TURNS": "consolidate_min_turns",
+    "QMX_CONSOLIDATE_MIN_CHARS": "consolidate_min_chars",
     "QMX_MCP_HOST": "mcp_host",
     "QMX_MCP_PORT": "mcp_port",
     "QMX_EMBED_DIM": "embed_dim",
@@ -70,6 +77,23 @@ class Settings:
     # timeout of the synchronous Stop-hook embed and of MCP queries, which must stay short. The
     # judge runs detached at session end, so a generous ceiling blocks nobody.
     chat_timeout: float = 300.0
+    # Judge thinking mode, sent as Ollama ``think``: "false" (default — the reasoning-first JSON
+    # field gives most of the benefit at a fraction of the cost), "true", or an effort level
+    # ("low"/"medium"/"high") for models that support them. qwen3.6 has no levels: any non-false
+    # value is full thinking (~5-6 min/session in the 2026-11 eval).
+    chat_think: str = "false"
+    # Where the judge runs. "ollama" (default) uses ``ollama_url``'s /api/chat; "openai" uses an
+    # OpenAI-compatible server (e.g. vLLM) at ``chat_url`` (base URL incl. /v1, e.g.
+    # "http://spark-0f50.local:8000/v1"), with optional bearer ``chat_api_key``.
+    chat_backend: str = "ollama"
+    chat_url: str = ""
+    chat_api_key: str = ""
+    # Cap on judge output tokens (reasoning field included) so one rambling reply cannot run away.
+    chat_max_tokens: int = 8192
+    # One-off gate for ``qmx consolidate`` / session-end: sessions with fewer turns or characters
+    # than this are skipped (and left un-consolidated so a resumed session can accumulate).
+    consolidate_min_turns: int = 8
+    consolidate_min_chars: int = 4000
 
     # Reranker: base URL of a Cohere-style /v1/rerank server (llama.cpp llama-server --reranking).
     # Empty = disabled (RRF-only). e.g. "http://spark-0e81.local:8081".
@@ -154,7 +178,7 @@ def _coerce_value(name: str, raw: object) -> object:
         return tuple(s.strip() for s in items if str(s).strip())
     if name in {
         "embed_dim", "embed_batch_size", "max_retries", "mcp_port", "parked_stale_days",
-        "chat_num_ctx",
+        "chat_num_ctx", "consolidate_min_turns", "consolidate_min_chars", "chat_max_tokens",
     }:
         return int(raw)
     if name in {"request_timeout", "retry_base_delay", "chat_timeout"}:
