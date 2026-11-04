@@ -25,7 +25,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 
-from qmx.chat import ChatModel
+from qmx.chat import ChatModel, ChatReplyError
 from qmx.embed import Embedder
 from qmx.learnings import (
     LEARNING_TYPES,
@@ -48,6 +48,19 @@ _MATCH_POOL = 5  # live lessons shown to the supersede judge per candidate
 # Budgeted separately so they can never crowd the live matches out of the prompt.
 _MATCH_RETIRED = 3
 
+# Output cap for the short judge calls (decision, merge check, retirement check, dedup check). Their
+# replies peaked at ~2,100 tokens on 57 replayed real calls (median ~400); 3072 leaves headroom and
+# bounds a runaway reply to ~2-3 minutes instead of the 8192-token extract cap.
+SHORT_REPLY_MAX_TOKENS = 3072
+
+# Appended to every judge prompt. The judge often quotes inside its free-text fields (`reasoning`
+# especially); an unescaped double quote closes the JSON string early. With the fixed-layout grammar
+# (qmx.grammar) that only truncates the field, but it still cuts the reasoning short.
+_QUOTE_RULE = (
+    " In every JSON text value, quote with single quotes ('like this'), never double quotes: an "
+    "unescaped double quote ends the value early."
+)
+
 EXTRACT_SYSTEM = (
     "You distill durable, reusable engineering lessons from a coding session transcript. "
     "Keep only lessons worth recalling next time: a decision and why, a mistake and its "
@@ -65,7 +78,7 @@ EXTRACT_SYSTEM = (
     "Return JSON {\"learnings\": [...]}; return an empty list if nothing is durable. "
     "Before listing lessons, think it through in the `reasoning` field: walk the session, name "
     "each candidate lesson and say why it is or is not durable. Then fill `learnings`."
-)
+) + _QUOTE_RULE
 
 CONSOLIDATE_SYSTEM = (
     "You maintain a deduplicated store of engineering lessons. Given a NEW candidate lesson and "
@@ -84,7 +97,7 @@ CONSOLIDATE_SYSTEM = (
     "existing lesson (same lesson? corrects it? unrelated?). Then fill the remaining fields. "
     "`statement` and `detail` must contain only the lesson itself — never commentary about other "
     "lessons, their ids, or why you chose the action (that belongs in `reasoning`)."
-)
+) + _QUOTE_RULE
 
 # ``reasoning`` is the FIRST property of both schemas on purpose: Ollama turns the schema into a
 # grammar that emits fields in ``properties`` order, so the model writes its analysis before it
@@ -129,7 +142,7 @@ PRESERVE_SYSTEM = (
     "if NEW does not state it. List every fact in NEW that appears in neither OLD nor CANDIDATE. "
     "NEW preserves OLD only if it still states OLD's core claim and is not really about a "
     "different subject. Think it through in `reasoning` first, then answer."
-)
+) + _QUOTE_RULE
 
 PRESERVE_SCHEMA = {
     "type": "object",
@@ -156,7 +169,7 @@ DEPRECATE_SYSTEM = (
     "CANDIDATE that contradicts or obsoletes OLD — leave it empty if CANDIDATE does not actually "
     "contradict OLD (adding detail, narrowing it, or agreeing with it is NOT a contradiction). "
     "Think it through in `reasoning` first, then answer."
-)
+) + _QUOTE_RULE
 
 DEPRECATE_SCHEMA = {
     "type": "object",
@@ -180,7 +193,7 @@ DEDUP_SYSTEM = (
     "it. If it is, decide whether CANDIDATE adds a durable, specific fact that EXISTING lacks; if "
     "so, write a merged statement and detail that keep EXISTING's core claim word-for-word where "
     "possible and add the new fact. Think it through in `reasoning` first, then answer."
-)
+) + _QUOTE_RULE
 DEDUP_SCHEMA = {
     "type": "object",
     "properties": {
@@ -226,6 +239,10 @@ class ConsolidateResult:
     dedup_dropped: int = 0  # `new` candidates found to restate an existing lesson; not stored
     dedup_merged: int = 0  # `new` candidates that added a fact; merged into the existing lesson
     passes: int = 0  # extract passes run (a long session is split into several)
+    # Judge replies that were unusable (cut off at the cap, runaway timeout, not JSON). Each failed
+    # safe: a decision -> stored as new, a check -> refused, an extract -> pass left for next run.
+    unusable_replies: int = 0
+    failed_passes: int = 0  # extract passes whose reply was unusable; their turns stay queued
     skipped_small: bool = False  # below the one-off gate; turns left un-consolidated to accumulate
     chunks_consolidated: int = 0
     learning_ids: list[int] = field(default_factory=list)
@@ -264,7 +281,7 @@ def consolidate_candidate(
     a trace is indistinguishable from one that was never extracted.
     """
     matches, sims = _nearest_learnings(store, embedder, candidate["statement"], scope)
-    decision = _decide(chat, candidate, matches, sims) if matches else {"action": "new"}
+    decision = _decide(chat, candidate, matches, sims, result) if matches else {"action": "new"}
     fallback = False  # True once a refused update/retirement falls through to "store as new"
     action = decision.get("action", "new")
     log.debug(
@@ -284,17 +301,21 @@ def consolidate_candidate(
 
     if action == "drop":
         retired = [m.learning_id for m in matches if not m.is_live]
-        log.info(
-            "dropped candidate %r: re-learns retired lesson(s) %s",
-            candidate["statement"][:80],
-            retired or "(none matched)",
-        )
+        if retired:
+            log.info("dropped candidate %r: re-learns retired lesson(s) %s",
+                     candidate["statement"][:80], retired)
+        else:
+            # `drop` is defined for retired lessons, but the judge also uses it for a candidate
+            # that restates a live lesson; say so instead of "re-learns retired (none matched)".
+            live = [m.learning_id for m in matches if m.is_live][:3]
+            log.info("dropped candidate %r: judge found it already covered (no retired match; "
+                     "nearest live lesson(s) %s)", candidate["statement"][:80], live)
         result.dropped += 1
         return
 
     if action == "deprecate" and _valid_target(target_id, matches):
         target = next(m for m in matches if m.learning_id == target_id)
-        if _contradiction_verified(chat, target, candidate):
+        if _contradiction_verified(chat, target, candidate, result):
             reason = decision.get("reason") or f"contradicted while learning: {statement}"
             deprecate_learning(store, target_id, reason=reason)
             log.info("deprecated learning #%s: %s", target_id, reason)
@@ -311,7 +332,7 @@ def consolidate_candidate(
 
     if action == "update" and _valid_target(target_id, matches):
         target = next(m for m in matches if m.learning_id == target_id)
-        keeps, lost = _merge_preserves(chat, target, statement, detail, candidate)
+        keeps, lost = _merge_preserves(chat, target, statement, detail, candidate, result)
         if keeps:
             # Only pass what the merge actually produced: in `update_learning` a ``None`` *clears*
             # the column, so an absent detail/anchors must be omitted rather than sent as None.
@@ -395,13 +416,28 @@ def consolidate_session(
         result.skipped_small = True
         return result
     path = chunks[0].path
-    for window in _windows(chunks):
+    windows = _windows(chunks)
+    log.info("consolidating doc %s (%s): %d turns in %d pass(es)", doc_id, path, len(chunks),
+             len(windows))
+    for p, window in enumerate(windows, 1):
         turns = [{"role": h.symbol or "?", "text": h.text, "line": h.start_line} for h in window]
         result.turns_read += len(turns)
         result.passes += 1
-        candidates = extract_learnings(chat, turns)
+        try:
+            candidates = extract_learnings(chat, turns)
+        except ChatReplyError as exc:
+            # Not marked consolidated: an unusable extract must not look like "no lessons here".
+            # The turns stay queued for the next run (the judge is not deterministic at temp 0).
+            log.warning("doc %s pass %d/%d: extract reply unusable (%s); turns left for the next "
+                        "run", doc_id, p, len(windows), exc)
+            result.unusable_replies += 1
+            result.failed_passes += 1
+            continue
         result.candidates += len(candidates)
-        for cand in candidates:
+        log.info("doc %s pass %d/%d: %d candidate(s)", doc_id, p, len(windows), len(candidates))
+        for i, cand in enumerate(candidates, 1):
+            log.info("doc %s pass %d candidate %d/%d: %r", doc_id, p, i, len(candidates),
+                     cand["statement"][:80])
             anchors = [{"transcript_path": path, "line": t["line"]} for t in turns[:3]]
             consolidate_candidate(
                 store, embedder, chat, cand, scope=scope, source_anchors=anchors, result=result,
@@ -458,8 +494,27 @@ def _nearest_learnings(
     return live + retired, sims
 
 
+def _ask(
+    chat: ChatModel, system: str, user: str, schema: dict, *, what: str,
+    result: ConsolidateResult | None,
+) -> dict | None:
+    """One short judge call (capped at ``SHORT_REPLY_MAX_TOKENS``); ``None`` if the reply was
+    unusable, so the caller can fail safe. A judge outage (:class:`ChatBackendError`) propagates."""
+    try:
+        return chat.complete_json(system, user, schema=schema, max_tokens=SHORT_REPLY_MAX_TOKENS)
+    except ChatReplyError as exc:
+        log.warning("%s: judge reply unusable (%s); failing safe", what, exc)
+        if result is not None:
+            result.unusable_replies += 1
+        return None
+
+
 def _decide(
-    chat: ChatModel, candidate: dict, matches: list[Learning], sims: dict[int, float] | None = None
+    chat: ChatModel,
+    candidate: dict,
+    matches: list[Learning],
+    sims: dict[int, float] | None = None,
+    result: ConsolidateResult | None = None,
 ) -> dict:
     listing = "\n".join(_describe_match(m, (sims or {}).get(m.learning_id)) for m in matches)
     user = (
@@ -467,11 +522,18 @@ def _decide(
         + (f"\ndetail: {candidate['detail']}" if candidate.get("detail") else "")
         + f"\n\nEXISTING similar lessons:\n{listing}"
     )
-    return chat.complete_json(CONSOLIDATE_SYSTEM, user, schema=CONSOLIDATE_SCHEMA)
+    decision = _ask(chat, CONSOLIDATE_SYSTEM, user, CONSOLIDATE_SCHEMA,
+                    what=f"decision for {candidate['statement'][:60]!r}", result=result)
+    return decision if decision is not None else {"action": "new"}  # unusable -> store as new
 
 
 def _merge_preserves(
-    chat: ChatModel, target: Learning, statement: str, detail: str | None, candidate: dict
+    chat: ChatModel,
+    target: Learning,
+    statement: str,
+    detail: str | None,
+    candidate: dict,
+    result: ConsolidateResult | None = None,
 ) -> tuple[bool, str]:
     """Ask the judge whether the merged text still states ``target``'s core claim.
 
@@ -486,12 +548,17 @@ def _merge_preserves(
         return s + (f"\ndetail: {d}" if d else "")
 
     new_text = text(statement, detail)
-    reply = chat.complete_json(
+    reply = _ask(
+        chat,
         PRESERVE_SYSTEM,
         f"OLD:\n{text(target.statement, target.detail)}\n\nNEW:\n{new_text}"
         f"\n\nCANDIDATE:\n{text(candidate['statement'], candidate.get('detail'))}",
-        schema=PRESERVE_SCHEMA,
+        PRESERVE_SCHEMA,
+        what=f"merge check into #{getattr(target, 'learning_id', '?')}",
+        result=result,
     )
+    if reply is None:
+        return False, "the merge check reply was unusable"
     evidence = str(reply.get("evidence_in_new") or "").strip()
     quoted = bool(evidence) and _norm(evidence) in _norm(new_text)
     additions = [str(a) for a in reply.get("unsupported_additions") or [] if str(a).strip()]
@@ -529,13 +596,16 @@ def _dedup_into(
     def text(s: str, d: str | None) -> str:
         return s + (f"\ndetail: {d}" if d else "")
 
-    reply = chat.complete_json(
+    reply = _ask(
+        chat,
         DEDUP_SYSTEM,
         f"EXISTING:\n{text(existing.statement, existing.detail)}"
         f"\n\nCANDIDATE:\n{text(candidate['statement'], candidate.get('detail'))}",
-        schema=DEDUP_SCHEMA,
+        DEDUP_SCHEMA,
+        what=f"dedup check against #{existing.learning_id}",
+        result=result,
     )
-    if reply.get("same_lesson") is not True:
+    if reply is None or reply.get("same_lesson") is not True:
         return False
     stmt = str(reply.get("merged_statement") or "").strip()
     detail = str(reply.get("merged_detail") or "").strip() or None
@@ -544,7 +614,7 @@ def _dedup_into(
                  candidate["statement"][:80], existing.learning_id)
         result.dedup_dropped += 1
         return True
-    keeps, why = _merge_preserves(chat, existing, stmt, detail, candidate)
+    keeps, why = _merge_preserves(chat, existing, stmt, detail, candidate, result)
     if not keeps:
         log.info("dropped candidate %r: same as #%s but the merge would lose its claim (%s)",
                  candidate["statement"][:80], existing.learning_id, why)
@@ -563,7 +633,9 @@ def _dedup_into(
     return True
 
 
-def _contradiction_verified(chat: ChatModel, target: Learning, candidate: dict) -> bool:
+def _contradiction_verified(
+    chat: ChatModel, target: Learning, candidate: dict, result: ConsolidateResult | None = None
+) -> bool:
     """True only if the judge quotes a span of the candidate that contradicts ``target``.
 
     The quote is checked against the candidate's text in code; an unusable reply fails safe (the
@@ -573,9 +645,10 @@ def _contradiction_verified(chat: ChatModel, target: Learning, candidate: dict) 
         f"\ndetail: {candidate['detail']}" if candidate.get("detail") else ""
     )
     old_text = target.statement + (f"\ndetail: {target.detail}" if target.detail else "")
-    reply = chat.complete_json(
-        DEPRECATE_SYSTEM, f"OLD:\n{old_text}\n\nCANDIDATE:\n{cand_text}", schema=DEPRECATE_SCHEMA
-    )
+    reply = _ask(chat, DEPRECATE_SYSTEM, f"OLD:\n{old_text}\n\nCANDIDATE:\n{cand_text}",
+                 DEPRECATE_SCHEMA, what=f"retirement check of #{target.learning_id}", result=result)
+    if reply is None:
+        return False  # unusable -> the lesson stays live
     quote = str(reply.get("contradiction_quote") or "").strip()
     return reply.get("contradicts") is True and bool(quote) and _norm(quote) in _norm(cand_text)
 

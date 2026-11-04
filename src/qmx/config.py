@@ -31,6 +31,7 @@ _ENV_MAP = {
     "QMX_CHAT_URL": "chat_url",
     "QMX_CHAT_API_KEY": "chat_api_key",
     "QMX_CHAT_MAX_TOKENS": "chat_max_tokens",
+    "QMX_CHAT_JSON_LAYOUT": "chat_json_layout",
     "QMX_DEDUP_MIN_SIMILARITY": "dedup_min_similarity",
     "QMX_CONSOLIDATE_MIN_TURNS": "consolidate_min_turns",
     "QMX_CONSOLIDATE_MIN_CHARS": "consolidate_min_chars",
@@ -90,7 +91,13 @@ class Settings:
     chat_url: str = ""
     chat_api_key: str = ""
     # Cap on judge output tokens (reasoning field included) so one rambling reply cannot run away.
+    # Short judge calls (decisions and checks) use a lower per-call cap; see qmx.consolidate.
     chat_max_tokens: int = 8192
+    # JSON layout the "openai" backend asks for. "indent" (default): a per-request grammar that
+    # admits exactly json.dumps(indent=2) — no free whitespace, so a string the model closes early
+    # cannot loop on newlines until the cap (qmx.grammar). "schema": plain response_format
+    # json_schema, for servers without per-request grammars (vLLM's structured_outputs.grammar).
+    chat_json_layout: str = "indent"
     # One-off gate for ``qmx consolidate`` / session-end: sessions with fewer turns or characters
     # than this are skipped (and left un-consolidated so a resumed session can accumulate).
     consolidate_min_turns: int = 8

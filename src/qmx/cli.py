@@ -639,6 +639,7 @@ def _cmd_consolidate(settings: Settings, args: argparse.Namespace) -> int:
 
             created = updated = superseded = candidates = 0
             deprecated = dropped = blocked = passes = skipped = dup_dropped = dup_merged = 0
+            unusable = failed_passes = 0
             for doc_id in targets:
                 res = consolidate_session(
                     store, embedder, chat, doc_id, scope=args.scope,
@@ -656,6 +657,8 @@ def _cmd_consolidate(settings: Settings, args: argparse.Namespace) -> int:
                 dup_dropped += res.dedup_dropped
                 dup_merged += res.dedup_merged
                 skipped += res.skipped_small
+                unusable += res.unusable_replies
+                failed_passes += res.failed_passes
                 candidates += res.candidates
     except ChatBackendError as exc:
         # Deferred, not lost: a pass is only marked consolidated once it finishes, so these turns
@@ -673,7 +676,8 @@ def _cmd_consolidate(settings: Settings, args: argparse.Namespace) -> int:
     )
     if dropped:
         # Never let a discarded candidate look like one that was simply never extracted.
-        print(f"  ({dropped} candidate(s) dropped as re-learning retired lessons; -v for which)")
+        print(f"  ({dropped} candidate(s) dropped by the judge as already covered or re-learning "
+              "a retired lesson; -v for which)")
     if blocked:
         print(f"  ({blocked} update(s) blocked by the merge guardrail — stored as new instead; "
               "-v for which)")
@@ -681,6 +685,10 @@ def _cmd_consolidate(settings: Settings, args: argparse.Namespace) -> int:
         print(f"  ({passes} extract passes: long sessions were read in several windows)")
     if skipped:
         print(f"  ({skipped} session(s) below the one-off gate — left for later)")
+    if unusable:
+        # One bad reply no longer defers the run: each failed safe (see ConsolidateResult).
+        print(f"  ({unusable} judge repl(ies) unusable — failed safe; {failed_passes} extract "
+              "pass(es) left queued for the next run; -v for which)")
     if dup_dropped or dup_merged:
         print(f"  (near-duplicate check: {dup_dropped} dropped as restating an existing lesson, "
               f"{dup_merged} merged into one)")
