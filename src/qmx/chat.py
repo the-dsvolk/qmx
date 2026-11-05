@@ -18,7 +18,7 @@ from typing import Protocol, runtime_checkable
 
 import httpx
 
-from qmx.config import Settings
+from qmx.config import Settings, template_kwargs_json
 from qmx.grammar import UnsupportedSchema, json_grammar
 
 log = logging.getLogger("qmx.chat")
@@ -61,6 +61,8 @@ class OllamaChat:
         self._num_ctx = settings.chat_num_ctx
         self._think = _think_value(settings.chat_think)
         self._max_tokens = settings.chat_max_tokens
+        self._temperature = float(settings.chat_temperature)
+        self._top_p = float(settings.chat_top_p)
         self._max_retries = settings.max_retries
         self._base_delay = settings.retry_base_delay
         self._owns_client = client is None
@@ -90,7 +92,9 @@ class OllamaChat:
         return _parse_json_object(body["message"]["content"])
 
     def _options(self, cap: int) -> dict:
-        options: dict = {"temperature": 0.0}
+        options: dict = {"temperature": self._temperature}  # Settings.chat_temperature (0.0)
+        if self._top_p > 0:  # Settings.chat_top_p; 0 = not sent
+            options["top_p"] = self._top_p
         if self._num_ctx > 0:  # 0 = keep the model's own num_ctx
             options["num_ctx"] = self._num_ctx
         if cap > 0:
@@ -128,9 +132,13 @@ class OllamaChat:
 class OpenAIChat:
     """Client for an OpenAI-compatible ``/chat/completions`` server (e.g. vLLM).
 
-    Same contract as :class:`OllamaChat`: schema-constrained JSON, temperature 0, thinking per
-    ``chat_think`` (vLLM/Qwen chat templates take ``enable_thinking`` and an optional
-    ``reasoning_effort``), output capped at ``chat_max_tokens``.
+    Same contract as :class:`OllamaChat`: schema-constrained JSON, temperature ``chat_temperature``
+    (default 0), thinking per ``chat_think`` (vLLM/Qwen chat templates take ``enable_thinking`` and
+    an optional ``reasoning_effort``), output capped at ``chat_max_tokens``. Off by default, for
+    models that need them (Nemotron 3.5 Super): ``chat_top_p`` (sent only when > 0) and
+    ``chat_template_kwargs``, whose keys are merged over the computed ``chat_template_kwargs``
+    (e.g. ``{"enable_thinking": true, "medium_effort": true}``; Nemotron ignores
+    ``reasoning_effort``).
 
     JSON layout (``chat_json_layout``): "schema" (default) sends ``response_format: json_schema``.
     "indent" (opt-in) sends a per-request grammar admitting exactly ``json.dumps(obj, indent=2)``
@@ -153,6 +161,11 @@ class OpenAIChat:
         self._layout = layout
         self._model = settings.chat_model
         self._think = _think_value(settings.chat_think)
+        self._temperature = float(settings.chat_temperature)
+        self._top_p = float(settings.chat_top_p)
+        # Settings.load already validated it; a hand-built Settings may carry anything.
+        extra = template_kwargs_json(settings.chat_template_kwargs)
+        self._template_kwargs: dict = json.loads(extra) if extra else {}
         self._max_tokens = settings.chat_max_tokens
         self._max_retries = settings.max_retries
         self._base_delay = settings.retry_base_delay
@@ -187,18 +200,23 @@ class OpenAIChat:
         return reply
 
     def _payload(self, system: str, user: str, schema: dict | None, cap: int) -> dict:
+        # Key order is part of the contract: with default settings the body is byte-identical to
+        # what the Qwen3.8 judge was validated with (tests/test_judge_settings.py pins it).
         kwargs: dict = {"enable_thinking": self._think is not False}
         if isinstance(self._think, str):
             kwargs["reasoning_effort"] = self._think
+        kwargs.update(self._template_kwargs)  # Settings.chat_template_kwargs: override wins
         payload: dict = {
             "model": self._model,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            "temperature": 0.0,
-            "chat_template_kwargs": kwargs,
+            "temperature": self._temperature,
         }
+        if self._top_p > 0:
+            payload["top_p"] = self._top_p
+        payload["chat_template_kwargs"] = kwargs
         if cap > 0:
             payload["max_tokens"] = cap
         if schema is None:
@@ -242,6 +260,7 @@ class OpenAIChat:
             except (httpx.HTTPError, KeyError, IndexError, TypeError) as exc:
                 last_exc = exc
             else:
+                _log_usage(resp, cap)
                 if choice.get("finish_reason") == "length":
                     raise ChatReplyError(f"reply cut off at max_tokens={cap}")
                 return content or ""
@@ -289,6 +308,19 @@ def _effective_cap(configured: int, requested: int | None) -> int:
     if requested is None or requested <= 0:
         return configured
     return min(configured, requested) if configured > 0 else requested
+
+
+def _log_usage(resp: httpx.Response, cap: int) -> None:
+    """Debug-log the reply's token usage (vLLM ``usage``), so cap headroom can be measured."""
+    if not log.isEnabledFor(logging.DEBUG):
+        return
+    try:
+        usage = resp.json().get("usage") or {}
+    except ValueError:
+        return
+    if usage.get("completion_tokens") is not None:
+        log.debug("judge reply: %s completion tokens (cap %s), %s prompt tokens",
+                  usage.get("completion_tokens"), cap or "none", usage.get("prompt_tokens"))
 
 
 def _mentions_grammar(text: str) -> bool:

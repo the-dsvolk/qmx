@@ -18,7 +18,7 @@ from pathlib import Path
 from qmx.capture import capture
 from qmx.chat import ChatBackendError, make_chat
 from qmx.config import Settings
-from qmx.consolidate import consolidate_session
+from qmx.consolidate import consolidate_session, judge_config
 from qmx.embed import (
     CircuitBreakerEmbedder,
     EmbedBackendError,
@@ -619,6 +619,9 @@ def _cmd_consolidate(settings: Settings, args: argparse.Namespace) -> int:
         print("consolidate: pass --session <transcript> or --all", file=sys.stderr)
         return 2
     try:
+        # Prompts, short-call cap and filing rules from settings (judge_filing_rules,
+        # judge_reasoning_field, chat_short_max_tokens); the defaults are today's judge exactly.
+        judge = judge_config(settings)
         with (
             _open_store(settings) as store,
             OllamaEmbedder(settings) as embedder,
@@ -639,13 +642,14 @@ def _cmd_consolidate(settings: Settings, args: argparse.Namespace) -> int:
 
             created = updated = superseded = candidates = 0
             deprecated = dropped = blocked = passes = skipped = dup_dropped = dup_merged = 0
-            unusable = failed_passes = supersede_blocked = 0
+            unusable = failed_passes = supersede_blocked = headline_blocked = offrule_blocked = 0
             for doc_id in targets:
                 res = consolidate_session(
                     store, embedder, chat, doc_id, scope=args.scope,
                     min_turns=settings.consolidate_min_turns,
                     min_chars=settings.consolidate_min_chars,
                     dedup_min_similarity=settings.dedup_min_similarity,
+                    judge=judge,
                 )
                 created += res.created
                 updated += res.updated
@@ -654,6 +658,8 @@ def _cmd_consolidate(settings: Settings, args: argparse.Namespace) -> int:
                 dropped += res.dropped
                 blocked += res.update_blocked
                 supersede_blocked += res.supersede_blocked
+                headline_blocked += res.headline_blocked
+                offrule_blocked += res.offrule_blocked
                 passes += res.passes
                 dup_dropped += res.dedup_dropped
                 dup_merged += res.dedup_merged
@@ -685,6 +691,15 @@ def _cmd_consolidate(settings: Settings, args: argparse.Namespace) -> int:
     if supersede_blocked:
         print(f"  ({supersede_blocked} supersede(s) blocked by the retirement guardrail — old "
               "lesson kept live, candidate sent through the near-duplicate check; -v for which)")
+    if headline_blocked:
+        # Filing rules v2 only: a merge must keep the old lesson's first sentence.
+        print(f"  ({headline_blocked} merge(s) refused by the headline backstop — the merged "
+              "statement no longer began with the old first sentence; a refused update was "
+              "re-checked as a near-duplicate, a refused near-duplicate merge dropped; -v for "
+              "which)")
+    if offrule_blocked:
+        print(f"  ({offrule_blocked} merge(s) refused for adding a different rule — candidate "
+              "stored as new instead; -v for which)")
     if passes > len(targets) - skipped:
         print(f"  ({passes} extract passes: long sessions were read in several windows)")
     if skipped:
