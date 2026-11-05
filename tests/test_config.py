@@ -17,7 +17,9 @@ def test_defaults():
     assert s.request_timeout == 60.0  # embeds/hooks keep the short timeout
     assert s.chat_think == "false"
     assert (s.consolidate_min_turns, s.consolidate_min_chars) == (8, 4000)
-    assert (s.chat_backend, s.chat_url, s.chat_max_tokens) == ("ollama", "", 8192)
+    # A fresh install points at the production judge (vLLM on the primary spark).
+    assert (s.chat_backend, s.chat_url, s.chat_model, s.chat_max_tokens) == (
+        "openai", "http://spark-0e81.local:8000/v1", "qwen3.8-judge", 8192)
     assert s.dedup_min_similarity == 0.65
 
 

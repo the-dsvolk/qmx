@@ -93,8 +93,10 @@ def test_openai_backend_effort_and_factory():
         "enable_thinking": True, "reasoning_effort": "medium"}
     with make_chat(s) as c:
         assert isinstance(c, OpenAIChat)
-    with make_chat(Settings()) as c:
+    with make_chat(Settings(chat_backend="ollama")) as c:
         assert isinstance(c, Ollama)
+    with make_chat(Settings()) as c:  # default: the production vLLM judge
+        assert isinstance(c, OpenAIChat)
 
 
 # -- fixed JSON layout, per-call caps, unusable replies vs. a dead judge (2026-11-04) ----------

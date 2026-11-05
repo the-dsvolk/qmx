@@ -77,26 +77,28 @@ class Settings:
     embed_model: str = "qwen3-embedding:0.6b"
     rerank_model: str = "qwen3-reranker"
     # Consolidation/learnings judge — read from here, never hardcoded (see plan/qmx-learnings.md).
-    chat_model: str = "qwen3.6:35b-a3b"
-    # Judge context window, sent per request as Ollama ``num_ctx`` (the served qwen3.6 build pins
-    # 32768 in its Modelfile). On an oversized prompt Ollama silently keeps only about half the
-    # window, so at 32K long sessions were judged on 26-46% of their turns; 65536 fixes that at the
-    # same speed and memory (hybrid attention: 23 GB at both). 0 = leave it to the model default.
+    # Default: the production judge, Qwen3.8-27B NVFP4 + DFlash2 served by vLLM under this name.
+    chat_model: str = "qwen3.8-judge"
+    # Judge context window for the "ollama" backend only, sent per request as Ollama ``num_ctx``
+    # (vLLM fixes it server-side with --max-model-len). On an oversized prompt Ollama silently
+    # keeps only about half the window, so at 32K long sessions were judged on 26-46% of their
+    # turns (the retired qwen3.6 judge pinned 32768); 65536 fixed that. 0 = the model default.
     chat_num_ctx: int = 65536
     # Judge HTTP timeout. Deliberately separate from ``request_timeout``: that one is also the read
     # timeout of the synchronous Stop-hook embed and of MCP queries, which must stay short. The
     # judge runs detached at session end, so a generous ceiling blocks nobody.
     chat_timeout: float = 300.0
-    # Judge thinking mode, sent as Ollama ``think``: "false" (default — the reasoning-first JSON
-    # field gives most of the benefit at a fraction of the cost), "true", or an effort level
-    # ("low"/"medium"/"high") for models that support them. qwen3.6 has no levels: any non-false
-    # value is full thinking (~5-6 min/session in the 2026-11 eval).
+    # Judge thinking mode: "false" (default — the reasoning-first JSON field gives most of the
+    # benefit at a fraction of the cost), "true", or an effort level ("low"/"medium"/"high") for
+    # models that support them. Sent as ``enable_thinking``/``reasoning_effort`` chat-template
+    # kwargs ("openai" backend) or as Ollama ``think`` ("ollama" backend).
     chat_think: str = "false"
-    # Where the judge runs. "ollama" (default) uses ``ollama_url``'s /api/chat; "openai" uses an
-    # OpenAI-compatible server (e.g. vLLM) at ``chat_url`` (base URL incl. /v1, e.g.
-    # "http://spark-0e81.local:8000/v1"), with optional bearer ``chat_api_key``.
-    chat_backend: str = "ollama"
-    chat_url: str = ""
+    # Where the judge runs. "openai" (default) uses an OpenAI-compatible server (vLLM) at
+    # ``chat_url`` (base URL incl. /v1; default: the production judge on the primary spark), with
+    # optional bearer ``chat_api_key``; "ollama" uses ``ollama_url``'s /api/chat. Override
+    # ``chat_url`` in config when the judge lives elsewhere.
+    chat_backend: str = "openai"
+    chat_url: str = "http://spark-0e81.local:8000/v1"
     chat_api_key: str = ""
     # Cap on judge output tokens (reasoning field included) so one rambling reply cannot run away.
     # Short judge calls (decisions and checks) use a lower per-call cap; see qmx.consolidate.

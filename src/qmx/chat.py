@@ -1,12 +1,15 @@
-"""Chat model — a thin Ollama ``/api/chat`` client behind a :class:`ChatModel` protocol.
+"""Chat model — thin judge clients behind a :class:`ChatModel` protocol.
 
 The consolidation model (extract + supersede judgment) is the one qmx component where model quality
 matters (see ``plan/qmx-learnings.md``). Like :mod:`qmx.embed`, qmx never loads it in-process — it
-POSTs to Ollama (``chat_model``, e.g. ``qwen3.6:35b-a3b``, served on the Spark). The protocol is the
-seam that lets tests swap a deterministic fake with no backend.
+POSTs to a model server. :func:`make_chat` picks the client from ``chat_backend``:
+:class:`OpenAIChat` ("openai", default) for an OpenAI-compatible server such as vLLM — production
+serves ``chat_model = "qwen3.8-judge"`` (Qwen3.8-27B) at ``chat_url`` on the Spark — or
+:class:`OllamaChat` ("ollama") for Ollama's ``/api/chat``. The protocol is the seam that lets tests
+swap a deterministic fake with no backend.
 
-JSON is requested via Ollama's ``format`` field (schema-constrained decoding) so the reply parses
-without brittle text scraping; :func:`ChatModel.complete_json` returns the parsed object.
+JSON is schema-constrained (``response_format``/grammar on vLLM, ``format`` on Ollama) so the reply
+parses without brittle text scraping; :func:`ChatModel.complete_json` returns the parsed object.
 """
 
 from __future__ import annotations
@@ -289,8 +292,8 @@ class OpenAIChat:
 
 
 def make_chat(settings: Settings) -> OllamaChat | OpenAIChat:
-    """The judge client ``settings.chat_backend`` selects ("ollama" default, or "openai")."""
-    backend = (settings.chat_backend or "ollama").strip().lower()
+    """The judge client ``settings.chat_backend`` selects ("openai" default, or "ollama")."""
+    backend = (settings.chat_backend or "openai").strip().lower()
     if backend == "openai":
         return OpenAIChat(settings)
     if backend != "ollama":
