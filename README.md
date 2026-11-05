@@ -11,14 +11,15 @@ Powered by the [Qwen](https://github.com/QwenLM) embedding/rerank models and
 [`tobi/qmd`](https://github.com/tobi/qmd) (MIT).
 
 **Start here:** [QUICKSTART.md](./QUICKSTART.md) (install → index → use from Claude Code) ·
-[INFRA.md](./INFRA.md) (the Ollama backend + services) · [plan/](./plan) (design).
+[INFRA.md](./INFRA.md) (the model backends — Ollama, vLLM, llama.cpp — + services) ·
+[plan/](./plan) (design).
 
 ## Why
 
 - **Find by meaning, not grep** — "where's the launcher logic" instead of guessing symbol names.
 - **Remember conversations** — semantic recall across every past Claude Code session.
-- **Private by construction** — code and chats are embedded by an Ollama backend you control and
-  stored in a local index — never sent to a cloud service.
+- **Private by construction** — code and chats are embedded (Ollama) and distilled (vLLM) by model
+  servers you control and stored in a local index — never sent to a cloud service.
 
 ## Architecture
 
@@ -31,39 +32,42 @@ flowchart LR
   subgraph MAC["Your Mac — the client (answers here)"]
     S["qmx MCP server"]
     DB[("local index<br/>SQLite: vectors + BM25")]
+    CON["qmx consolidate<br/>(SessionEnd hook · nightly)"]
     S <--> DB
+    CON --> DB
   end
 
   subgraph SPARK["DGX Spark — GPU (models only)"]
-    E["Qwen embeddings"]
-    C["Qwen chat model<br/>(learnings / consolidation)"]
-    R["Qwen reranker"]
+    E["Qwen embeddings<br/>(Ollama)"]
+    C["Qwen3.8 judge · vLLM<br/>(learnings / consolidation)"]
+    R["Qwen reranker<br/>(llama.cpp)"]
   end
 
   U -->|"MCP: query · recall · lessons"| S
   S -->|"embed · rerank"| E
   S -.->|"rerank top-k"| R
-  S -->|"consolidate chats → lessons"| C
+  CON -->|"consolidate chats → lessons"| C
 ```
 
-- **DGX Spark (GPU)** — runs the **Qwen models only**: **embeddings**, the **reranker**, and the
-  **chat model** that distils chats into *learnings*. Text is sent for compute; **nothing is stored
-  there**.
+- **DGX Spark (GPU)** — runs the **Qwen models only**: **embeddings** (Ollama), the **reranker**
+  (llama.cpp), and the **judge** that distils chats into *learnings* (Qwen3.8 on vLLM). Text is sent
+  for compute; **nothing is stored there**.
 - **Your Mac (the client)** — holds the **local index** (SQLite: `sqlite-vec` vectors + FTS5/BM25)
-  and runs the **MCP server**. It does the actual searching and **answers from the local DB**,
-  calling the Spark only for model compute.
+  and runs the **MCP server** and **consolidation** (`qmx consolidate`). It does the actual
+  searching and **answers from the local DB**, calling the Spark only for model compute.
 - **Claude Code (you)** — talks to the Mac's MCP server (`query` / `recall` / `lessons` / …); it
   never touches the Spark directly.
 
-One config knob (`QMX_OLLAMA_URL`) points the Mac at the Spark. In more detail, qmx is two
-cooperating pieces:
+A few config knobs point the Mac at the Spark: `QMX_OLLAMA_URL` (embeddings), `chat_url` (the
+judge) and, optionally, `rerank_url`. In more detail, qmx is two cooperating pieces:
 
 - **qmx** (this tool) — the **index and search**: chunking, the SQLite store (`sqlite-vec` + FTS5),
   hybrid ranking, the CLI, and the MCP server all run **on your machine**.
-- **An Ollama backend** — produces the **embeddings** with a **Qwen** model (and, for the learnings
-  tier, serves the **chat model**; optionally a **reranker**). It can be the *same* machine, or a GPU
-  box on your LAN (e.g. a DGX Spark). The only thing that crosses to it is the text being embedded or
-  consolidated; the index and all search stay local.
+- **Model servers** — an **Ollama backend** produces the **embeddings** with a **Qwen** model. For
+  the learnings tier, the **judge** (a Qwen chat model) runs on an OpenAI-compatible server — vLLM
+  in production (`chat_backend = "openai"`); optionally a llama.cpp **reranker**. They can be the
+  *same* machine, or a GPU box on your LAN (e.g. a DGX Spark). The only thing that crosses to them
+  is the text being embedded, reranked or consolidated; the index and all search stay local.
 
 So you can run everything on one laptop, or keep the index local and offload embeddings to a GPU box.
 
@@ -157,8 +161,8 @@ flowchart LR
 (Delete → the file's chunks are dropped; move → drop old + index new. `busy_timeout` lets watch,
 the capture hook, and `refresh` write the flat KB concurrently.)
 
-Choose where the backend lives with `QMX_OLLAMA_URL` and which model embeds with `embed_model`
-(see [QUICKSTART.md](./QUICKSTART.md)).
+Choose where the embedding backend lives with `QMX_OLLAMA_URL` and which model embeds with
+`embed_model` (see [QUICKSTART.md](./QUICKSTART.md)).
 
 **Reranking (optional)** — when `rerank_url` is set, the RRF top candidates are re-scored by a
 cross-encoder (**Qwen3-Reranker** via llama.cpp `--reranking` on the Spark GPU) and trimmed to `k`.
@@ -206,8 +210,17 @@ folders are not tracked automatically.
 Beyond raw recall, qmx distils past chats into a **learnings** tier (`kind=learning`) — reusable
 *decisions*, *mistakes+corrections*, and *how-tos* — deduped/superseded so they self-correct, and
 **proactively injected at session start** so an agent begins already knowing. See
-[`plan/qmx-learnings.md`](./plan/qmx-learnings.md) for the design; the model (a Qwen chat model, e.g.
-`qwen3.6:35b-a3b`) is config-driven via `chat_model`, never hardcoded.
+[`plan/qmx-learnings.md`](./plan/qmx-learnings.md) for the design. The judge model is config-driven
+(`chat_backend` / `chat_url` / `chat_model`), never hardcoded. In production it is **Qwen3.8-27B**
+(NVFP4, DFlash2 speculative decoding) served by **vLLM** through its OpenAI-compatible API on the
+Spark, with thinking off, a reasoning-first JSON field and temperature 0:
+
+```toml
+# ~/.qmx/config.toml — the code defaults still name the retired Ollama judge, so set all three
+chat_backend = "openai"
+chat_url     = "http://spark-0e81.local:8000/v1"
+chat_model   = "qwen3.8-judge"
+```
 
 ```bash
 qmx add-learning "raise IAM PRs at project level" --type mistake \
@@ -247,16 +260,46 @@ Consolidation retires too, so the loop closes: the judge's actions are
 **new / update / supersede / deprecate / drop** — it can retire a lesson a session proved wrong with
 nothing to replace it, and, because retired lessons are shown to it flagged `[RETIRED: why]`, it
 `drop`s a candidate that merely re-learns one instead of quietly resurrecting it next session. Both
-counts are reported by `qmx consolidate`, never silent.
+counts are reported by `qmx consolidate`, never silent. Long sessions are read in several passes
+(≤200 turns / ≤100K characters each), and sessions below a one-off gate (`consolidate_min_turns` 8,
+`consolidate_min_chars` 4000) are skipped and left to accumulate.
 
 **Merge guardrails.** `update` is the only destructive action (supersede/deprecate keep the old row),
 and the judge sometimes "merges" a candidate into an *unrelated* neighbour, replacing that lesson's
 point — e.g. a household wash-sale rule rewritten as a lot-schema rule. So before any `update` the
-judge answers a second question: *does the merged text still state the target's core claim?* If not
-(or the answer is unusable), the update is refused, the target is left intact and the candidate is
-stored as a new lesson in its own words; `qmx consolidate` reports the count. Every in-place update —
+judge answers a second question: *does the merged text still state the target's core claim?* — and
+must quote, verbatim, where that claim survives in the merged text (checked in code). If not (or the
+answer is unusable), the update is refused, the target is left intact and the candidate is stored as
+a new lesson in its own words; `qmx consolidate` reports the count. Every in-place update —
 consolidation or manual — also snapshots the previous text (`learning_revisions`, schema v6), so
 `qmx learning-history` / `qmx revert-learning` (and the matching MCP tools) can undo a bad edit.
+
+**Retirement guardrail.** `supersede` and `deprecate` both hide a live lesson, so both need a
+verified contradiction: the judge quotes the span of the candidate that contradicts the old lesson,
+and code checks the quote is really in the candidate. A refused `deprecate` stores the candidate as
+new; a refused `supersede` keeps the old lesson live and sends the candidate through the
+near-duplicate check below.
+
+**Near-duplicate check.** A `new` candidate whose nearest live lesson is at least
+`dedup_min_similarity` (0.65; 0 disables) similar gets one more question — *same lesson?* — and is
+dropped, merged into that lesson, or kept as new.
+
+**When the judge misbehaves.** Each call has an output cap — 3072 tokens for the short decision and
+check calls (`chat_short_max_tokens`), 8192 for extraction (`chat_max_tokens`). A reply that is cut
+off, runs away past the timeout, or is not JSON fails safe for that one decision (decision → stored
+as new, merge/retirement check → refused, near-duplicate check → kept, extract → that pass stays
+queued) instead of failing the run. Three unusable replies in a row, or an unreachable judge,
+**defer** the run: there is no fallback judge, and a pass is marked consolidated only once it
+finishes, so its turns stay queued for the next session end or the nightly `qmx consolidate --all`.
+`chat_json_layout = "indent"` (opt-in; default `"schema"`) constrains vLLM to a fixed JSON layout
+that rules out runaway whitespace.
+
+**Judge client settings (opt-in).** `chat_temperature` (0.0), `chat_top_p` (0 = not sent),
+`chat_template_kwargs` (a JSON object merged into vLLM's chat-template kwargs),
+`chat_short_max_tokens` (3072), `judge_reasoning_field` (true) and `judge_filing_rules`
+(`"current"` | `"v2"`) let a different judge model run from config alone. The defaults are the
+validated Qwen3.8 judge's request exactly; production keeps `judge_filing_rules = "current"`, and
+`"v2"` is an experimental rule set still being tuned. See [`INFRA.md`](./INFRA.md) for details.
 
 **Hooks** (optional, wire in `settings.json` like the `Stop`/capture hook) — inject at start,
 consolidate at end (the latter runs detached so it never blocks session close):
@@ -281,9 +324,10 @@ workspace folder is inside one (env override: `QMX_CAPTURE_EXCLUDE_ROOTS`, comma
 capture_exclude_roots = ["~/memoir"]
 ```
 
-**Setting it up** — pull the chat model, wire the hooks, and (optionally) schedule the nightly
-sweep: see step 8 of [`QUICKSTART.md`](./QUICKSTART.md), which points at [`INFRA.md`](./INFRA.md) for
-the running services (the Spark model + the launchd agents).
+**Setting it up** — point qmx at the judge (the `chat_*` lines above), wire the hooks, and
+(optionally) schedule the nightly sweep: see step 8 of [`QUICKSTART.md`](./QUICKSTART.md), which
+points at [`INFRA.md`](./INFRA.md) for the running services (the vLLM judge on the Spark + the
+launchd agents).
 
 ## Parked items ("park this, come back later")
 
@@ -310,23 +354,24 @@ listing and a "similar item" hint on park. Parking works with the Spark off — 
 
 Capabilities #1–#3 implemented: code search, chat recall, and the **learnings/consolidation** tier
 (schema v6; `add-learning`/`lessons`/`promote`, in-place `update-learning` with revision
-history + `revert-learning`, `deprecate-learning`/`restore-learning`, a `consolidate` judge that
-can new/update/supersede/deprecate/drop behind a merge guardrail, and SessionStart/SessionEnd
-hooks). qmx
+history + `revert-learning`, `deprecate-learning`/`restore-learning`, a `consolidate` judge (Qwen3.8
+on vLLM) that can new/update/supersede/deprecate/drop behind merge, retirement and near-duplicate
+guardrails, and SessionStart/SessionEnd hooks). qmx
 indexes your Claude Code **conversation history** alongside code — `qmx backfill-chats` for past
 transcripts and a `Stop` hook (`qmx capture`) for live turns, recalled via `mcp__qmx__recall`. Built
 on the resident **MCP server**, tree-sitter chunking, incremental indexing, and hybrid **vector +
 BM25 → RRF** search — with an optional **Qwen3-Reranker** stage (llama.cpp on the Spark GPU; see
 [`plan/qmx-ml-notes.md`](./plan/qmx-ml-notes.md)). See [`plan/`](./plan) for the design.
 
-Because the index is local, **search keeps working when the model backend is off** — qmx degrades
-to keyword-only (BM25) results and flags them, rather than failing. See *When the Spark is off* in
-[`QUICKSTART.md`](./QUICKSTART.md).
+Because the index is local, **search keeps working when the embedding backend is off** — qmx
+degrades to keyword-only (BM25) results and flags them, rather than failing. See *When the Spark is
+off* in [`QUICKSTART.md`](./QUICKSTART.md).
 
 ## Development
 
-Python 3.12 + [`uv`](https://docs.astral.sh/uv/). The model backend (Ollama) runs on the DGX Spark
-in prod; point at it with `QMX_OLLAMA_URL` (see [`plan/qmx-deployment.md`](./plan/qmx-deployment.md)).
+Python 3.12 + [`uv`](https://docs.astral.sh/uv/). The model backends run on the DGX Spark in prod —
+Ollama for embeddings (`QMX_OLLAMA_URL`), vLLM for the judge (`chat_url`); see
+[`plan/qmx-deployment.md`](./plan/qmx-deployment.md) and [`INFRA.md`](./INFRA.md).
 
 ```bash
 uv sync                         # create the venv, install qmx + dev tools
@@ -367,7 +412,7 @@ claude mcp add --transport http qmx http://spark-0e81.local:8765/mcp
 ```
 
 The tools then appear as `mcp__qmx__query`, `mcp__qmx__search_code`, `mcp__qmx__recall`,
-`mcp__qmx__lessons`, `mcp__qmx__add_learning`, `mcp__qmx__update_learning`,
+`mcp__qmx__meetings`, `mcp__qmx__lessons`, `mcp__qmx__add_learning`, `mcp__qmx__update_learning`,
 `mcp__qmx__deprecate_learning`, `mcp__qmx__restore_learning`, `mcp__qmx__learning_history`,
 `mcp__qmx__revert_learning`, `mcp__qmx__park`,
 `mcp__qmx__list_parked`, `mcp__qmx__unpark`, `mcp__qmx__resume_parked`, `mcp__qmx__get`,
