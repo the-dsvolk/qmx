@@ -12,7 +12,8 @@ seam. The recommended personal setup is:
 If instead you want one shared index served to many clients, run everything on the Spark — see the
 "Server-resident" note at the bottom and [`plan/qmx-deployment.md`](./plan/qmx-deployment.md).
 
-For how the backend (Ollama on the Spark) is set up and kept alive, see [`INFRA.md`](./INFRA.md).
+For how the backends (Ollama for embeddings, vLLM for the learnings judge, both on the Spark) are
+set up and kept alive, see [`INFRA.md`](./INFRA.md).
 
 ---
 
@@ -276,17 +277,16 @@ Beyond raw recall, qmx distils past chats into reusable **lessons** (`kind=learn
 start so an agent begins already knowing. Design: [`README.md`](./README.md#learnings-distilled-lessons)
 and [`plan/qmx-learnings.md`](./plan/qmx-learnings.md).
 
-**A. Pull the chat model** (the consolidation judge) on the Ollama backend, and point `chat_model`
-at it. It runs on the same Ollama the embeddings use — see [`INFRA.md`](./INFRA.md) for the Spark
-setup:
+**A. Point qmx at the judge.** The consolidation judge is **not** on Ollama (Ollama only does the
+embeddings): it is Qwen3.8-27B served by **vLLM** through its OpenAI-compatible API on the Spark
+(port 8000). The vLLM container (`qwen38-judge`) and its fallback are described in
+[`INFRA.md`](./INFRA.md); nothing needs pulling on the Ollama host.
 
-```bash
-ollama pull qwen3.6:35b-a3b     # on the Ollama host (the Spark); ~23 GB
-```
 ```toml
 # ~/.qmx/config.toml — optional; these are the defaults, add only to override
-chat_model = "qwen3.6:35b-a3b"
-chat_num_ctx = 65536   # judge context window, sent per request (the model itself pins 32768)
+chat_backend = "openai"
+chat_url     = "http://spark-0e81.local:8000/v1"
+chat_model   = "qwen3.8-judge"
 chat_timeout = 300     # judge-only HTTP timeout; request_timeout (60) stays short for hooks
 ```
 
