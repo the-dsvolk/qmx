@@ -42,6 +42,7 @@ from tests.judge_scenario import GOLDEN_SHA256, Recorder, run_scenario, scenario
 SCOPE = "the-dsvolk/qmx"
 V2 = build_judge("v2")  # Qwen wrapper (reasoning field)
 V2_SUPER = build_judge("v2", reasoning_field=False, short_max_tokens=16384)
+V2_BLOCK = build_judge("v2", offrule_block=True)  # judge_offrule_block = true
 
 
 # == byte-identical defaults ======================================================================
@@ -352,6 +353,15 @@ def test_current_without_reasoning_field_matches_what_the_eval_harness_ran():
     assert p.preserve_system.endswith("not really about a different subject." + C._QUOTE_RULE)
 
 
+@pytest.mark.parametrize("rf", [True, False])
+def test_v2_decision_has_no_lean_towards_new(rf):
+    """Validation: "choose `new` ... when you cannot tell" made Qwen3.8 file same-rule candidates
+    (keychain -> #123, list-price -> #1157) as new lessons."""
+    decide = build_judge("v2", reasoning_field=rf).prompts.consolidate_system
+    assert "cannot tell" not in decide
+    assert "choose `new` only when they differ" in decide
+
+
 def test_v2_schemas():
     assert "old_core_claim" not in PRESERVE_SCHEMA_V2["properties"]
     assert list(PRESERVE_SCHEMA_V2["properties"]) == [
@@ -459,12 +469,28 @@ def test_near_duplicate_merge_that_rewrites_the_headline_is_dropped(store, tmp_p
     assert s.get_learning(target).statement == OLD
 
 
+def test_off_rule_update_is_applied_and_flagged_by_default(store, tmp_path, caplog):
+    """Default (judge_offrule_block = false): the headline is kept, so the merge goes through; the
+    flag is a warning and a counter, not a refusal (validation: the block refused good merges)."""
+    off = {**PASS_CHECK, "off_rule_additions": ["store lots and trades in separate tables"]}
+    bloat = {**EXTEND, "statement": OLD + "; store lots and trades in separate tables"}
+    with caplog.at_level(logging.WARNING, logger="qmx.consolidate"):
+        s, target, _, rec, res = _run(store, tmp_path, bloat, checks=[off])
+    assert _kinds(rec) == ["extract", "decision", "merge"]
+    assert (res.offrule_flagged, res.offrule_blocked, res.update_blocked, res.updated,
+            res.created) == (1, 0, 0, 1, 0)
+    assert s.get_learning(target).statement == bloat["statement"]
+    assert any("adds another rule" in r.getMessage() and "applied" in r.getMessage()
+               for r in caplog.records)
+
+
 def test_off_rule_update_is_stored_as_new_without_a_dedup_question(store, tmp_path):
     off = {**PASS_CHECK, "off_rule_additions": ["store lots and trades in separate tables"]}
     bloat = {**EXTEND, "statement": OLD + "; store lots and trades in separate tables"}
-    s, target, _, rec, res = _run(store, tmp_path, bloat, checks=[off])
+    s, target, _, rec, res = _run(store, tmp_path, bloat, checks=[off], judge=V2_BLOCK)
     assert _kinds(rec) == ["extract", "decision", "merge"]
     assert (res.offrule_blocked, res.update_blocked, res.created, res.updated) == (1, 1, 1, 0)
+    assert res.offrule_flagged == 0
     assert s.get_learning(target).statement == OLD
     [new] = [le for le in s.list_learnings() if le.learning_id != target]
     assert new.statement == CAND["statement"]
@@ -477,11 +503,24 @@ def test_off_rule_near_duplicate_merge_keeps_the_candidate_as_new(store, tmp_pat
               "merged_statement": OLD + ". Store lots and trades in separate tables.",
               "merged_detail": OLD_DETAIL}
     off = {**PASS_CHECK, "off_rule_additions": ["Store lots and trades in separate tables."]}
-    s, target, _, rec, res = _run(store, tmp_path, None, dup_checks=[merged], checks=[off])
+    s, target, _, rec, res = _run(store, tmp_path, None, dup_checks=[merged], checks=[off],
+                                  judge=V2_BLOCK)
     assert _kinds(rec) == ["extract", "decision", "dedup", "merge"]
     assert (res.offrule_blocked, res.created, res.dedup_dropped, res.dedup_merged) == (1, 1, 0, 0)
     assert s.get_learning(target).statement == OLD and s.learning_revisions(target) == []
     assert {le.statement for le in s.list_learnings()} == {OLD, CAND["statement"]}
+
+
+def test_off_rule_near_duplicate_merge_is_applied_by_default(store, tmp_path):
+    merged = {"same_lesson": True, "adds_new_fact": True,
+              "merged_statement": OLD + ". Store lots and trades in separate tables.",
+              "merged_detail": OLD_DETAIL}
+    off = {**PASS_CHECK, "off_rule_additions": ["Store lots and trades in separate tables."]}
+    s, target, _, rec, res = _run(store, tmp_path, None, dup_checks=[merged], checks=[off])
+    assert _kinds(rec) == ["extract", "decision", "dedup", "merge"]
+    assert (res.offrule_flagged, res.offrule_blocked, res.dedup_merged, res.created) == (
+        1, 0, 1, 0)
+    assert s.get_learning(target).statement == merged["merged_statement"]
 
 
 def test_claim_refusal_is_unchanged_under_v2(store, tmp_path):
@@ -538,7 +577,12 @@ DEPRECATE = {"reasoning": "wrong", "action": "deprecate", "reason": "IRAs exempt
       "false_in_old": "across all household accounts"}, False),  # not in the candidate
     ({"contradicts": False, "contradiction_quote": "no longer apply to IRAs",
       "false_in_old": "across all household accounts"}, False),
-], ids=["both-quotes", "no-old-quote", "old-quote-in-detail", "bad-candidate-quote", "no"])
+    ({"contradicts": True, "contradiction_quote": "no longer apply to IRAs",
+      "false_in_old": "household"}, False),  # #2030 -> #2034: a one-word quote fits any rule
+    ({"contradicts": True, "contradiction_quote": "no longer apply to IRAs",
+      "false_in_old": "all household accounts"}, True),  # three words is enough
+], ids=["both-quotes", "no-old-quote", "old-quote-in-detail", "bad-candidate-quote", "no",
+        "one-word-old-quote", "three-word-old-quote"])
 def test_supersede_needs_both_quotes(store, tmp_path, check, verified):
     s, target, chat, _, res = _run(store, tmp_path, SUPERSEDE, cand=RETIRE_CAND,
                                    retire_checks=[check], dup_checks=[{"same_lesson": False}])
@@ -556,6 +600,15 @@ def test_deprecate_needs_both_quotes(store, tmp_path, verified):
                                 retire_checks=[check])
     assert (res.deprecated, res.deprecate_blocked) == ((1, 0) if verified else (0, 1))
     assert res.created == (0 if verified else 1)
+
+
+def test_short_main_rule_can_be_quoted_whole(store, tmp_path):
+    """A main rule shorter than the minimum can still be retired by quoting all of it."""
+    check = {"contradicts": True, "contradiction_quote": "no longer apply to IRAs",
+             "false_in_old": "Freeze IRAs"}
+    s, target, _, _, res = _run(store, tmp_path, SUPERSEDE, cand=RETIRE_CAND,
+                                statement="Freeze IRAs", retire_checks=[check])
+    assert (res.superseded, res.supersede_blocked) == (1, 0)
 
 
 def test_quotes_are_compared_after_folding(store, tmp_path):

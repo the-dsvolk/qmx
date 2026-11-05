@@ -244,15 +244,24 @@ export OLLAMA_HOST=127.0.0.1:11434
      is dropped. On the eval merges it caught every known clobber and fired 0 times under the v2
      prompts; under the current prompts it would block about half of Qwen's acceptable rewordings,
      which is why it ships only with v2.
-  3. **Off-rule block in the merge check.** The judge lists clauses of the merged text that state a
-     different rule than OLD MAIN RULE; any → the merge is refused and the candidate is stored as
-     new (never dropped), on the update and the near-duplicate path. This is the topic-match merge
-     (recommender facts appended to an unrelated CUD lesson). Lost facts and unsupported additions
-     are logged only.
+  3. **Off-rule check in the merge check.** The judge lists clauses of the merged text that state a
+     different rule than OLD MAIN RULE (the topic-match merge: recommender facts appended to an
+     unrelated CUD lesson). By default such a merge is applied, logged as a warning and counted
+     (`offrule_flagged`); with `judge_offrule_block = true` it is refused and the candidate stored as
+     new (never dropped), on the update and the near-duplicate path. The block was the default
+     until the PR #39 validation (2026-11-05) showed it refusing merges that kept the headline and
+     should have gone through (they became near-duplicate lessons). Lost facts and unsupported
+     additions are logged only.
   4. **Two-quote retirement check.** `supersede`/`deprecate` need the candidate's contradicting
-     words *and* the words of OLD MAIN RULE that become false, both verified verbatim in code.
+     words *and* the words of OLD MAIN RULE that become false, both verified verbatim in code; the
+     old-side quote must be at least 3 words (or the whole main rule if shorter), because a one-word
+     quote ("vLLM-only") let a wrong retirement through.
   Also: no `[type]` tags or whole-value quote wrapping in judge-written text (stripped in code),
-  and `qmx consolidate` reports `headline_blocked` / `offrule_blocked`. The precursor of these
+  and `qmx consolidate` reports `headline_blocked` / `offrule_blocked` / `offrule_flagged`. The
+  decision prompt no longer tells the judge to choose `new` "when you cannot tell": in validation
+  Qwen3.8 filed same-rule candidates as new lessons. With v2 on Qwen3.8, set
+  `chat_short_max_tokens = 6144`: at 3072 the reasoning-first merge check was cut off on long
+  lessons (an unusable reply refuses the merge). The precursor of these
   prompts ("rules-v2") replayed the 15 known filing failures cleanly (Qwen3.8 15/15 vs 11/15 with
   the current prompts; Super 15/15), but Qwen then made 0 merges; the same-rule test above targets
   that over-caution. The final texts are not validated yet: v2 becomes the default only after the
@@ -269,6 +278,7 @@ export OLLAMA_HOST=127.0.0.1:11434
   | `chat_short_max_tokens` (`QMX_CHAT_SHORT_MAX_TOKENS`) | `3072` | cap of decision / merge / retirement / near-duplicate calls (thinking shares it) |
   | `judge_reasoning_field` (`QMX_JUDGE_REASONING_FIELD`) | `true` | reasoning-first field in all five calls (true/false, 1/0, yes/no, on/off) |
   | `judge_filing_rules` (`QMX_JUDGE_FILING_RULES`) | `"current"` | `"current"` or `"v2"` |
+  | `judge_offrule_block` (`QMX_JUDGE_OFFRULE_BLOCK`) | `false` | v2 only: refuse (true) or log (false) a merge that adds a different rule |
 
   **Nemotron 3.5 Super profile** (experiments on the second spark; server unchanged: vLLM 0.32,
   Super NVFP4 + LiLiCorr, `--max-model-len 81920`, `nemotron_v3`). Native medium thinking
