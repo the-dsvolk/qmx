@@ -1,9 +1,10 @@
 # qmx — Infrastructure Runbook
 
-How the running qmx deployment is wired: the **Ollama backend** on the DGX Spark (installed,
-persisted across reboots, and bound for LAN access) and the **qmx servers** (a resident one on the
-Spark, a local one on the Mac). This is the concrete "what's actually running"; the design rationale
-is in [`plan/qmx-deployment.md`](./plan/qmx-deployment.md).
+How the running qmx deployment is wired: the **model backends** on the DGX Spark — **Ollama** for
+embeddings (installed, persisted across reboots, and bound for LAN access), the **vLLM judge**
+container and the llama.cpp **reranker** — and the **qmx servers** (the primary local one on the
+Mac, plus an alternative resident one on the Spark). This is the concrete "what's actually
+running"; the design rationale is in [`plan/qmx-deployment.md`](./plan/qmx-deployment.md).
 
 Everything on the Spark is installed **rootless** — it has no passwordless `sudo`, so no `apt`, no
 system services; user-space installs + `systemd --user` only.
@@ -13,10 +14,11 @@ system services; user-space installs + `systemd --user` only.
 | Host | Service | Bind | Purpose |
 |---|---|---|---|
 | Spark `spark-0e81.local` | Ollama | `0.0.0.0:11434` | Qwen embeddings (GPU); reachable on the LAN |
-| Spark `spark-0e81.local` | vLLM (OpenAI API) | `:8000` | **production judge** `qwen3.8-judge` (`chat_url = "http://spark-0e81.local:8000/v1"`) |
-| Spark | qmx MCP (resident) | `0.0.0.0:8765` | shared index served to any client |
+| Spark `spark-0e81.local` | vLLM (OpenAI API), Docker `qwen38-judge` | `:8000` | **production judge** `qwen3.8-judge` (`chat_url = "http://spark-0e81.local:8000/v1"`) |
+| Spark | qmx MCP (resident) | `0.0.0.0:8765` | alternative deployment: shared index served to any client |
 | Second spark `spark-0f50.local` | vLLM | `:8001` | judge experiments (Nemotron 3.5 Super); not production |
-| Mac | qmx MCP (local) | `127.0.0.1:8765` | personal index (Architecture B) |
+| Second spark `spark-0f50.local` | vLLM, Docker `qwen38-judge` (stopped, `restart=no`) | `:8000` | judge **fallback** only — see *Fallback* below |
+| Mac | qmx MCP (local) | `127.0.0.1:8765` | **primary**: personal index, what Claude Code connects to (Architecture B) |
 
 LAN-only trust model: the `0.0.0.0` binds expose Ollama and the Spark MCP to the local network
 (mDNS `*.local`). Fine on a trusted LAN — do **not** do this on an untrusted network without a
@@ -87,7 +89,8 @@ covers crashes.
 
 ## Spark — resident qmx MCP server (shared index)
 
-Serves a shared index to any client on the LAN. Runs from the checked-out repo via `uv run`.
+An alternative to the Mac-local server (which is what Claude Code uses in this deployment): serves a
+shared index to any client on the LAN. Runs from the checked-out repo via `uv run`.
 
 `~/.config/qmx/env`:
 
@@ -150,46 +153,63 @@ uvx --from "huggingface_hub[cli]" hf download ggml-org/Qwen3-Reranker-0.6B-Q8_0-
 
 ## Spark — learnings/consolidation model (chat, GPU)
 
-The learnings tier (`qmx consolidate` / `session-end`) distils chats into lessons with a **Qwen chat
-model** — the one qmx component where model quality matters (judgment: what's a durable lesson, is
-this a dup or a supersede?). It runs on the **same Ollama service** as embeddings (no new unit) —
-just pull the model:
+The learnings tier (`qmx consolidate` / `session-end`) distils chats into lessons with a **Qwen
+judge model** — the one qmx component where model quality matters (judgment: what's a durable
+lesson, is this a dup or a supersede?). It does **not** run on Ollama: since 2026-11-05 it is the
+Docker container **`qwen38-judge`** on the **primary** spark `spark-0e81` — vLLM v0.33.0 serving
+Qwen3.8-27B NVFP4 + DFlash2 speculative decoding as `qwen3.8-judge` on the OpenAI-compatible API
+at `:8000`, with `restart=unless-stopped` and `--gpu-memory-utilization 0.4` (≈47 GB, alongside
+the Ollama embedder and the reranker). A cold start takes **~8 min**. At boot the primary spark
+preloads only the embedder (`ollama-warmup.service`); the judge comes back through its Docker
+restart policy.
 
 ```bash
-export OLLAMA_HOST=127.0.0.1:11434
-~/.local/ollama/bin/ollama pull qwen3.6:35b-a3b   # MoE 35B/3B-active; ~23 GB, fits the ~118 GB VRAM
-~/.local/ollama/bin/ollama list                   # confirm it appears alongside qwen3-embedding:0.6b
+docker ps --filter name=qwen38-judge                  # on spark-0e81: is the judge up?
+docker logs -f qwen38-judge                           # load progress / request log
+curl -fsS http://spark-0e81.local:8000/v1/models      # from the Mac: lists qwen3.8-judge when ready
 ```
 
-> **Verified working (2026-07-18).** Pulled on the Spark (`qwen3.6:35b-a3b`, 23 GB, MoE) and served by
-> the shared Ollama. Verified **end-to-end from the client**: on the Mac, `Settings.load()` →
-> `OllamaChat` → the production `extract_learnings` path (`think=false` + schema-constrained `format`)
-> reaches the Spark over `QMX_OLLAMA_URL` and returns a valid `{"learnings":[…]}` extraction with
-> `type` correctly on-enum (`decision|mistake|howto`). Warm round-trip ≈10 s; first (cold) call ≈44 s
-> incl. loading the model into VRAM.
+There is **no Ollama judge** any more: `qwen3.6:35b-a3b` (the previous judge) and
+Qwen3-Coder-Next were removed from Ollama on 2026-11-05.
 
 - **Where it's configured — on the client, not here.** Consolidation runs where the CLI/hooks run
-  (the Mac), talking to *this* Ollama over `QMX_OLLAMA_URL`; the Spark's resident MCP server never
-  calls the chat model (it only serves retrieval). So the Spark just needs the model **pulled**; the
-  model *name* is set on the Mac in **`~/.qmx/config.toml`** (`chat_model = "qwen3.6:35b-a3b"`, or
-  `QMX_CHAT_MODEL`) — see the Mac section below. Default is `qwen3.6:35b-a3b`, never hardcoded; to
-  swap models, pull the new tag on the Spark and change that one value.
+  (the Mac), talking to the judge at `chat_url`; the Spark's resident MCP server never calls the
+  judge (it only serves retrieval). The judge is set on the Mac in **`~/.qmx/config.toml`**
+  (`chat_backend` / `chat_url` / `chat_model`, or `QMX_CHAT_BACKEND` / `QMX_CHAT_URL` /
+  `QMX_CHAT_MODEL`) — see the Mac section below. The code defaults are the production judge; the
+  consolidation code never hardcodes a model, so to swap models, serve the new one and change
+  those values.
 - **Batch, low-QPS.** Consolidation is a few calls at session end, so throughput is irrelevant;
-  `session-end` runs it **detached** so it never blocks a session closing. Nothing is resident.
-- **Context and timeout (judge only).** qmx sends `num_ctx = chat_num_ctx` (default **65536**) on
-  every judge call: the served `qwen3.6` build pins 32768, and on an oversized prompt Ollama silently
-  keeps only about half the window, so long sessions were judged on 26-46% of their turns. 64K costs
-  the same memory (23 GB) and speed. The judge waits up to `chat_timeout` (default **300 s**);
-  `request_timeout` (60 s) stays short because it also bounds the synchronous Stop-hook embed.
+  `session-end` runs it **detached** so it never blocks a session closing. qmx keeps no process
+  running for it; only the vLLM container stays up.
+- **Context and timeout (judge only).** vLLM's context window is fixed server-side. `chat_num_ctx`
+  (default **65536**) is sent only by the `"ollama"` backend, as Ollama `num_ctx` (it was raised
+  from 32768 when the retired qwen3.6 judge was judging long sessions on 26-46% of their turns).
+  The judge waits up to `chat_timeout` (default **300 s**); `request_timeout` (60 s) stays short
+  because it also bounds the synchronous Stop-hook embed.
 - **Judge on vLLM (primary spark).** Production runs `chat_backend = "openai"`, `chat_url =
-  "http://spark-0e81.local:8000/v1"`, `chat_model = "qwen3.8-judge"`: Qwen3.8-27B NVFP4 + DFlash2
-  served by vLLM on the **primary** spark (thinking off, reasoning-first JSON) — blind-graded 6.3 vs
-  5.1/10 against qwen3.6 on 12 sessions (2026-11-03), ~2 min/session. The second spark
-  (`spark-0f50.local`) is for judge experiments (Nemotron 3.5 Super, see *Judge filing rules v2*
-  below), not production. Hosts live only in config, never in code. If the judge is unreachable,
-  consolidation is **deferred**, not lost: a pass is only marked consolidated when it finishes, and
-  the nightly `qmx consolidate --all` (launchd, 03:00) picks the turns up. Rollback is config-only
-  (`chat_backend = "ollama"`).
+  "http://spark-0e81.local:8000/v1"`, `chat_model = "qwen3.8-judge"` (also the code defaults):
+  Qwen3.8-27B NVFP4 + DFlash2 served by vLLM on the **primary** spark (thinking off,
+  reasoning-first JSON) — blind-graded 6.3 vs 5.1/10 against qwen3.6 on 12 sessions (2026-11-03),
+  ~2 min/session. The second spark (`spark-0f50.local`) is only for judge experiments (Nemotron 3.5
+  Super on `:8001`, see *Judge filing rules v2* below), not production. Any other judge host goes
+  in config. If the judge is unreachable, consolidation is **deferred**, not lost: a pass is only
+  marked consolidated when it finishes, and the nightly `qmx consolidate --all` (launchd, 03:00)
+  picks the turns up.
+- **Fallback.** There is no Ollama judge to fall back to. The fallback is the stopped
+  `qwen38-judge` container on the second spark `spark-0f50` (`restart=no`, so it does not start at
+  boot). To use it, start it there and repoint the Mac:
+
+  ```bash
+  # on spark-0f50
+  docker update --restart unless-stopped qwen38-judge && docker start qwen38-judge
+  ```
+  ```toml
+  # ~/.qmx/config.toml on the Mac
+  chat_url = "http://spark-0f50.local:8000/v1"
+  ```
+
+  Allow for the cold start; turns that arrive meanwhile stay queued for the next run.
 - **Fixed JSON layout and unusable replies (vLLM judge).** With `response_format`, vLLM's grammar
   allows any whitespace between JSON tokens. When the judge writes an unescaped `"` in a text field,
   the string closes early and greedy decoding emits newlines until the token cap: roughly 1 in 50-100
@@ -307,27 +327,26 @@ export OLLAMA_HOST=127.0.0.1:11434
   `build_judge("v2", reasoning_field=False, short_max_tokens=16384)`); without `judge` it uses the
   module constants, i.e. today's judge. Under v2 the prompts differ from those constants, so a
   harness that tells call kinds apart by prompt should compare against `judge.prompts`.
-- **Deferred upgrade (only if v1 lessons are weak):** a `Qwen3.5-122B-A10B` in **NVFP4** on a
-  **vLLM** server (NVFP4 ≠ GGUF → not Ollama). Point `chat_model`/`QMX_OLLAMA_URL` at it if built.
-  See [`plan/qmx-learnings.md`](./plan/qmx-learnings.md) (*Model decision*).
+- **Deferred upgrade (only if the current judge's lessons are weak):** a `Qwen3.5-122B-A10B` in
+  **NVFP4** on a **vLLM** server (NVFP4 ≠ GGUF → not Ollama). Point `chat_url`/`chat_model` at it if
+  built. See [`plan/qmx-learnings.md`](./plan/qmx-learnings.md) (*Model decision*).
 
 Client-side hooks that call this model (`SessionStart` inject, `SessionEnd` consolidate) are wired in
 Claude Code `settings.json` on the Mac — see the **Learnings** section of [`README.md`](./README.md).
 
-## Mac — local qmx (Architecture B: index local, embed on the Spark)
+## Mac — local qmx (Architecture B: index local, embed on the Spark) — the primary setup
 
 - Install: `uv tool install "git+https://github.com/the-dsvolk/qmx"` → `~/.local/bin/qmx`.
 - Config `~/.qmx/config.toml`: `ollama_url = "http://spark-0e81.local:11434"`,
   `embed_model = "qwen3-embedding:0.6b"`, `embed_dim = 1024`, `mcp_host = "127.0.0.1"`,
   `mcp_port = 8765`. Index at `~/.qmx/index.db`.
-  - **Learnings model:** `chat_model = "qwen3.6:35b-a3b"` (the consolidation judge — this is the one
-    the `qmx consolidate` / `session-end` hook uses against the Spark's Ollama; must be pulled there).
-    It defaults to this value, so the line is optional unless you swap models.
-    `chat_num_ctx = 65536` and `chat_timeout = 300` (env `QMX_CHAT_NUM_CTX` / `QMX_CHAT_TIMEOUT`)
-    are the judge's context window and timeout; both are defaults, so set them only to override.
-    Production points the judge at vLLM on the primary spark (`chat_backend = "openai"`,
-    `chat_url = "http://spark-0e81.local:8000/v1"`, `chat_model = "qwen3.8-judge"`); sampling,
-    caps and filing rules are the defaults (see *Judge client settings* above).
+  - **Learnings judge:** `chat_backend = "openai"`, `chat_url = "http://spark-0e81.local:8000/v1"`,
+    `chat_model = "qwen3.8-judge"` — the vLLM judge on the primary spark that the
+    `qmx consolidate` / `session-end` hook calls. These are the code defaults, so the lines are
+    optional unless you move or swap the judge (on the fallback, `chat_url =
+    "http://spark-0f50.local:8000/v1"`). `chat_timeout = 300` (env `QMX_CHAT_TIMEOUT`) is the
+    judge's timeout; sampling, caps and filing rules are the defaults (see *Judge client settings*
+    above).
   - **Reranker (optional):** `rerank_url = "http://spark-0e81.local:8081"` enables the cross-encoder.
 - Claude Code: `claude mcp add --transport http --scope user qmx http://127.0.0.1:8765/mcp`.
 

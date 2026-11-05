@@ -216,7 +216,7 @@ Beyond raw recall, qmx distils past chats into a **learnings** tier (`kind=learn
 Spark, with thinking off, a reasoning-first JSON field and temperature 0:
 
 ```toml
-# ~/.qmx/config.toml — the code defaults still name the retired Ollama judge, so set all three
+# ~/.qmx/config.toml — these are also the code defaults; set them to point at another judge
 chat_backend = "openai"
 chat_url     = "http://spark-0e81.local:8000/v1"
 chat_model   = "qwen3.8-judge"
@@ -392,23 +392,33 @@ uv run pytest -m integration
 
 ## Use from Claude Code (MCP)
 
-Run the resident server (on the Spark in prod; it owns the index + background loops):
+Run the resident server (it owns the index + background loops). In the **primary setup** it runs
+**on your Mac**, serving the Mac's `~/.qmx/index.db` — kept up by the launchd agent `com.qmx.serve`,
+next to `com.qmx.watch` and the nightly `com.qmx.consolidate` (see [`INFRA.md`](./INFRA.md)):
 
 ```bash
 uv run qmx serve                       # HTTP on 127.0.0.1:8765/mcp by default
-QMX_MCP_HOST=0.0.0.0 uv run qmx serve  # bind to the LAN so other machines can reach it
 ```
 
 Register it with Claude Code — either the CLI:
 
 ```bash
-claude mcp add --transport http qmx http://spark-0e81.local:8765/mcp
+claude mcp add --transport http qmx http://127.0.0.1:8765/mcp
 ```
 
 …or in `settings.json`:
 
 ```json
-{ "mcpServers": { "qmx": { "type": "http", "url": "http://spark-0e81.local:8765/mcp" } } }
+{ "mcpServers": { "qmx": { "type": "http", "url": "http://127.0.0.1:8765/mcp" } } }
+```
+
+**Alternative: a Spark-hosted server** — one shared index served to several machines (on the Spark
+it runs as the `qmx-mcp.service` systemd user unit; see [`INFRA.md`](./INFRA.md)). Bind it to the
+LAN and point each client at the Spark instead:
+
+```bash
+QMX_MCP_HOST=0.0.0.0 uv run qmx serve                                 # on the Spark
+claude mcp add --transport http qmx http://spark-0e81.local:8765/mcp  # on each client
 ```
 
 The tools then appear as `mcp__qmx__query`, `mcp__qmx__search_code`, `mcp__qmx__recall`,

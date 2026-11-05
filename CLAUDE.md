@@ -21,8 +21,10 @@ add on-the-fly chat capture.
 
 - **Python 3.12**, managed with **`uv`** (never bare `python`/`pip`).
 - **Embeddings / rerank / summarize:** the **Qwen** family (Qwen3-Embedding, Qwen3-Reranker, a Qwen
-  chat model) — one Apache-2.0 stack. Served by **Ollama on the DGX Spark** (GB10/CUDA); qmx is a
-  thin HTTP client. See `plan/qmx-deployment.md` for the Mac-dev / Spark-prod topology.
+  chat model as the learnings judge) — one Apache-2.0 stack, served on the **DGX Spark**
+  (GB10/CUDA): embeddings by **Ollama**, the reranker by **llama.cpp**, and the judge (Qwen3.8-27B,
+  `qwen3.8-judge`) by **vLLM** through its OpenAI-compatible API. qmx is a thin HTTP client. See
+  `plan/qmx-deployment.md` for the Mac-dev / Spark-prod topology and `INFRA.md` for what runs where.
 - **Store:** SQLite with `sqlite-vec` (vectors) + FTS5 (BM25). Content-hash tables for incremental
   reindex + dedup.
 - **Chunking:** tree-sitter for code; markdown-aware for docs; JSONL→turn parser for chats.
@@ -44,6 +46,9 @@ add on-the-fly chat capture.
   account, so commits attribute to it (not the separate `dsovlk` account) and no real email lands in
   public history. Do **not** use a corporate email.
 
-> Status: scaffolding; plan complete, code not yet landed. Approach **decided** — from-scratch
-> (not a qmd fork); Ollama-on-Spark model hosting; Mac-dev / Spark-prod split. See `plan/` (esp.
-> `qmx-deployment.md`) for the design; build follows the phasing in `plan/qmx-plan.md`.
+> Status: in daily use — indexing, hybrid search + rerank, the MCP server, chat memory, learnings
+> and nightly consolidation have all landed (README "Status"); the consolidation judge is still
+> being tuned (filing rules v2 is opt-in). Approach: from-scratch (not a qmd fork); models on the
+> Spark (Ollama embeddings, llama.cpp reranker, vLLM judge); the qmx MCP server, index and
+> nightly jobs run on the Mac, with a Spark-hosted server as the alternative. `plan/` holds the
+> original design records (esp. `qmx-deployment.md`, `qmx-plan.md`).
