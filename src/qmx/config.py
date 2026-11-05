@@ -39,6 +39,7 @@ _ENV_MAP = {
     "QMX_CHAT_SHORT_MAX_TOKENS": "chat_short_max_tokens",
     "QMX_JUDGE_REASONING_FIELD": "judge_reasoning_field",
     "QMX_JUDGE_FILING_RULES": "judge_filing_rules",
+    "QMX_JUDGE_OFFRULE_BLOCK": "judge_offrule_block",
     "QMX_DEDUP_MIN_SIMILARITY": "dedup_min_similarity",
     "QMX_CONSOLIDATE_MIN_TURNS": "consolidate_min_turns",
     "QMX_CONSOLIDATE_MIN_CHARS": "consolidate_min_chars",
@@ -128,9 +129,13 @@ class Settings:
     judge_reasoning_field: bool = True
     # Judge filing rules: "current" (default) or "v2" — main-rule comparison, a code-computed main
     # rule (first sentence) in every check, a deterministic headline backstop on merges, an
-    # off-rule-additions block in the merge check and a two-quote retirement check
+    # off-rule-additions check in the merge check and a two-quote retirement check
     # (qmx.consolidate).
     judge_filing_rules: str = "current"
+    # v2 only. false (default): a merge the judge flags as adding a different rule is applied and
+    # logged (the headline backstop still guards the old main rule; blocking turned good merges into
+    # near-duplicates in validation). true: it is refused and the candidate stored as new.
+    judge_offrule_block: bool = False
     # One-off gate for ``qmx consolidate`` / session-end: sessions with fewer turns or characters
     # than this are skipped (and left un-consolidated so a resumed session can accumulate).
     consolidate_min_turns: int = 8
@@ -235,7 +240,7 @@ def _coerce_value(name: str, raw: object) -> object:
         "chat_temperature", "chat_top_p",
     }:
         return float(raw)
-    if name == "judge_reasoning_field":
+    if name in {"judge_reasoning_field", "judge_offrule_block"}:
         return _coerce_bool(name, raw)
     if name == "chat_template_kwargs":
         return template_kwargs_json(raw)

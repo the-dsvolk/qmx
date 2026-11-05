@@ -30,10 +30,11 @@ module constants below, i.e. today's behaviour). ``judge_filing_rules = "current
 validated production set. ``"v2"`` compares MAIN RULES instead of topics, where a lesson's main rule
 is the first sentence of its statement, computed in code (:func:`main_rule`) and handed to every
 check; adds a deterministic headline backstop (:func:`headline_kept`: a merged statement must begin
-with the old first sentence, extensions and corrected numbers allowed), an off-rule-additions block
-in the merge check (the candidate is then stored as new, never dropped) and a two-quote retirement
-check (the contradicting words of the candidate *and* the words of the old main rule that become
-false, both verified in code). ``judge_reasoning_field`` picks the per-model wrapper around one
+with the old first sentence, extensions and corrected numbers allowed), an off-rule-additions check
+in the merge check (logged by default; with ``judge_offrule_block`` the merge is refused and the
+candidate stored as new, never dropped) and a two-quote retirement check (the contradicting words of
+the candidate *and* at least three words of the old main rule that become false, both verified in
+code). ``judge_reasoning_field`` picks the per-model wrapper around one
 shared rule text: a reasoning-first JSON field (Qwen3.8, thinking off) or none (a model with native
 thinking, e.g. Nemotron 3.5 Super).
 """
@@ -301,8 +302,8 @@ CONSOLIDATE_RULES_V2 = (
     "of `reason`. Never `supersede` or `deprecate` because the candidate confirms, extends, "
     "narrows, gives an example of or offers an alternative to the old lesson, or corrects a minor "
     "detail; if you are not sure the old main rule is false, choose `update`. If the main rules "
-    "are the same, choose `update` or `drop`, not `new`; choose `new` when they differ or when you "
-    "cannot tell. Never `update`, `supersede` or `deprecate` a lesson marked RETIRED. Writing an "
+    "are the same, choose `update` or `drop`, not `new`; choose `new` only when they differ. "
+    "Never `update`, `supersede` or `deprecate` a lesson marked RETIRED. Writing an "
     "`update`: your `statement` and `detail` REPLACE the stored lesson. `statement` must begin "
     "with the existing statement's first sentence copied word for word; you may change a number in "
     "it that the candidate corrects and end it with a short clause, but put every other new fact "
@@ -428,6 +429,8 @@ class JudgeConfig:
     short_max_tokens: int = SHORT_REPLY_MAX_TOKENS
     filing_rules: str = "current"
     reasoning_field: bool = True
+    # v2 only: refuse (True) or only log (False) a merge that adds a different rule.
+    offrule_block: bool = False
 
     @property
     def v2(self) -> bool:
@@ -497,6 +500,7 @@ def build_judge(
     *,
     reasoning_field: bool = True,
     short_max_tokens: int | None = None,
+    offrule_block: bool = False,
 ) -> JudgeConfig:
     """A :class:`JudgeConfig`; ``short_max_tokens=None`` = ``SHORT_REPLY_MAX_TOKENS`` (read now).
 
@@ -512,16 +516,19 @@ def build_judge(
         short_max_tokens=cap,
         filing_rules=rules,
         reasoning_field=bool(reasoning_field),
+        offrule_block=bool(offrule_block),
     )
 
 
 def judge_config(settings: Settings) -> JudgeConfig:
     """The judge the ``judge_filing_rules`` / ``judge_reasoning_field`` /
-    ``chat_short_max_tokens`` settings select (defaults: today's judge, byte for byte)."""
+    ``chat_short_max_tokens`` / ``judge_offrule_block`` settings select (defaults: today's judge,
+    byte for byte)."""
     return build_judge(
         settings.judge_filing_rules,
         reasoning_field=settings.judge_reasoning_field,
         short_max_tokens=settings.chat_short_max_tokens,
+        offrule_block=settings.judge_offrule_block,
     )
 
 
@@ -639,10 +646,13 @@ class ConsolidateResult:
     # refused update goes through the near-duplicate check as a `new` candidate (one focused second
     # attempt, not counted in ``update_blocked``); a refused near-duplicate merge is dropped.
     headline_blocked: int = 0
-    # Filing rules v2 only. Merges refused because the merged text adds a different rule than the
-    # old lesson's main rule (topic-match merges). The candidate is stored as new on both paths, so
-    # it is also counted in ``created`` (and, for a decision `update`, in ``update_blocked``).
+    # Filing rules v2 only. Merges the merge check flagged as adding a different rule than the old
+    # lesson's main rule (topic-match merges). By default they are applied and counted in
+    # ``offrule_flagged``. With ``judge_offrule_block`` they are refused and counted in
+    # ``offrule_blocked``: the candidate is stored as new on both paths, so it is also counted in
+    # ``created`` (and, for a decision `update`, in ``update_blocked``).
     offrule_blocked: int = 0
+    offrule_flagged: int = 0
     dedup_dropped: int = 0  # `new` candidates found to restate an existing lesson; not stored
     dedup_merged: int = 0  # `new` candidates that added a fact; merged into the existing lesson
     passes: int = 0  # extract passes run (a long session is split into several)
@@ -753,7 +763,8 @@ def consolidate_candidate(
             result.deprecated += 1
             return
         # Refused: keep the old lesson live and store the candidate in its own words.
-        log.info("blocked retirement of learning #%s: no verifiable contradiction", target_id)
+        log.info("blocked retirement of learning #%s: no verifiable contradiction; storing "
+                 "candidate %r as new", target_id, candidate["statement"][:120])
         result.deprecate_blocked += 1
         fallback = True
         statement = candidate["statement"]
@@ -785,21 +796,23 @@ def consolidate_candidate(
             # gets one focused second attempt through the near-duplicate check below, whose merge
             # must pass the same backstop; otherwise it is stored in its own words.
             log.info("blocked update of learning #%s: the merged statement no longer begins with "
-                     "its first sentence; checking the candidate as new", target_id)
+                     "its first sentence; checking candidate %r as new", target_id,
+                     candidate["statement"][:120])
             result.headline_blocked += 1
         else:
             # Refused: keep the target intact and store the candidate in its *own* words (the
             # judge's merged text is a blend of target + candidate and would duplicate the target).
             if kind == "off_rule":
-                log.info("blocked update of learning #%s (%s); storing candidate as new",
-                         target_id, lost)
+                log.info("blocked update of learning #%s (%s); storing candidate %r as new",
+                         target_id, lost, candidate["statement"][:120])
                 result.offrule_blocked += 1
             else:
                 log.info(
-                    "blocked update of learning #%s (merge would lose: %s); storing candidate as "
-                    "new",
+                    "blocked update of learning #%s (merge would lose: %s); storing candidate %r "
+                    "as new",
                     target_id,
                     lost or "its core claim",
+                    candidate["statement"][:120],
                 )
             result.update_blocked += 1
             fallback = True
@@ -816,7 +829,7 @@ def consolidate_candidate(
             # live lesson (normally the target), and otherwise stores it in its own words (not the
             # judge's replacement text, which was written to stand in for the target).
             log.info("blocked supersede of learning #%s: no verifiable contradiction; checking "
-                     "the candidate as new", target_id)
+                     "candidate %r as new", target_id, candidate["statement"][:120])
             result.supersede_blocked += 1
             statement = candidate["statement"]
             detail = candidate.get("detail")
@@ -1028,9 +1041,11 @@ def _merge_check(
     ``kind`` says why a merge was refused: "unusable" (the reply), "claim" (not preserved / no
     verbatim evidence). Filing rules v2 refuse, in this order: "headline" — :func:`headline_kept`
     fails, decided in code *before* the judge is asked; "unusable"; "claim"; "off_rule" — the judge
-    lists a sentence or clause of NEW that states a different rule than OLD MAIN RULE. Under v2 the
-    judge is told OLD MAIN RULE (:func:`main_rule`) instead of choosing OLD's core claim itself, and
-    lost facts are logged, not blocked.
+    lists a sentence or clause of NEW that states a different rule than OLD MAIN RULE, refused only
+    with ``judge_offrule_block`` (default: applied, logged and counted in ``offrule_flagged``; in
+    validation the block refused merges that kept the headline and should have gone through). Under
+    v2 the judge is told OLD MAIN RULE (:func:`main_rule`) instead of choosing OLD's core claim
+    itself, and lost facts are logged, not blocked.
     """
     j = _resolve(judge)
     lid = getattr(target, "learning_id", "?")
@@ -1061,8 +1076,15 @@ def _merge_check(
         off_rule = _str_list(reply.get("off_rule_additions"))
         if off_rule:
             # Topic-match merges (R2 #1761, P-S3 #538/#1365/#1035): the old headline survives, so
-            # the quote check passes, but the merge appends a different rule.
-            return False, "off_rule", "the merge adds another rule: " + "; ".join(off_rule[:3])
+            # the quote check passes, but the merge appends a different rule. Blocking is opt-in:
+            # the PR #39 validation showed it refusing good merges (p05 -> #1911, cross-account
+            # wash -> #1933), which then became near-duplicate lessons.
+            why = "the merge adds another rule: " + "; ".join(off_rule[:3])
+            if j.offrule_block:
+                return False, "off_rule", why
+            log.warning("merge into #%s: %s (applied; judge_offrule_block refuses these)", lid, why)
+            if result is not None:
+                result.offrule_flagged += 1
         lost_facts = _str_list(reply.get("lost_facts"))
         if lost_facts:
             # Logged, not blocked: blocking on lost facts is unmeasured (see below for additions).
@@ -1165,6 +1187,10 @@ def _dedup_into(
     return True
 
 
+# Filing rules v2: the shortest ``false_in_old`` quote the retirement check accepts, in words.
+MIN_FALSE_IN_OLD_WORDS = 3
+
+
 def _contradiction_verified(
     chat: ChatModel,
     target: Learning,
@@ -1182,7 +1208,9 @@ def _contradiction_verified(
     OLD MAIN RULE (:func:`main_rule`, shown to the judge) that the candidate makes false. Both
     quotes must be verbatim (after :func:`_norm_v2`) — the first in the candidate, the second in
     the old main rule — so a real but non-contradicting candidate quote (#1852, #1142) no longer
-    retires a lesson whose main rule still holds.
+    retires a lesson whose main rule still holds. ``false_in_old`` must also be at least
+    :data:`MIN_FALSE_IN_OLD_WORDS` words (or the whole main rule, if shorter): a one-word quote
+    ("vLLM-only") is found in almost any rule and let a wrong retirement through (#2030 -> #2034).
     """
     j = _resolve(judge)
     cand_text = _lesson_text(candidate["statement"], candidate.get("detail"))
@@ -1201,12 +1229,15 @@ def _contradiction_verified(
         return (reply.get("contradicts") is True and bool(quote)
                 and _norm(quote) in _norm(cand_text))
     false_in_old = str(reply.get("false_in_old") or "").strip()
+    min_words = min(MIN_FALSE_IN_OLD_WORDS, len(_norm_v2(rule).split()))
+    long_enough = len(_norm_v2(false_in_old).split()) >= max(min_words, 1)
     ok = (reply.get("contradicts") is True
           and bool(quote) and _norm_v2(quote) in _norm_v2(cand_text)
-          and bool(false_in_old) and _norm_v2(false_in_old) in _norm_v2(rule))
+          and bool(false_in_old) and _norm_v2(false_in_old) in _norm_v2(rule)
+          and long_enough)
     if not ok and reply.get("contradicts") is True:
-        log.info("retirement check of #%s: quotes not verifiable (candidate %r, old main rule %r)",
-                 target.learning_id, quote[:80], false_in_old[:80])
+        log.info("retirement check of #%s: quotes not verifiable or too short (candidate %r, old "
+                 "main rule %r)", target.learning_id, quote[:80], false_in_old[:80])
     return ok
 
 

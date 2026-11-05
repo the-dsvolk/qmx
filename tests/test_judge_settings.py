@@ -93,6 +93,17 @@ def test_reasoning_field_bool_coercion(raw, expected):
     assert Settings._coerce({"judge_reasoning_field": raw}).judge_reasoning_field is expected
 
 
+def test_offrule_block_setting():
+    assert Settings.load(config_path=NO_CONFIG, env={}).judge_offrule_block is False
+    s = Settings.load(config_path=NO_CONFIG, env={"QMX_JUDGE_OFFRULE_BLOCK": "on"})
+    assert s.judge_offrule_block is True
+    from qmx.consolidate import judge_config
+    assert judge_config(s).offrule_block is True
+    assert judge_config(Settings.load(config_path=NO_CONFIG, env={})).offrule_block is False
+    with pytest.raises(ValueError, match="judge_offrule_block"):
+        Settings._coerce({"judge_offrule_block": "maybe"})
+
+
 def test_reasoning_field_rejects_anything_else():
     with pytest.raises(ValueError, match="judge_reasoning_field"):
         Settings._coerce({"judge_reasoning_field": "maybe"})

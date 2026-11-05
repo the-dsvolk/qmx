@@ -643,6 +643,7 @@ def _cmd_consolidate(settings: Settings, args: argparse.Namespace) -> int:
             created = updated = superseded = candidates = 0
             deprecated = dropped = blocked = passes = skipped = dup_dropped = dup_merged = 0
             unusable = failed_passes = supersede_blocked = headline_blocked = offrule_blocked = 0
+            offrule_flagged = 0
             for doc_id in targets:
                 res = consolidate_session(
                     store, embedder, chat, doc_id, scope=args.scope,
@@ -660,6 +661,7 @@ def _cmd_consolidate(settings: Settings, args: argparse.Namespace) -> int:
                 supersede_blocked += res.supersede_blocked
                 headline_blocked += res.headline_blocked
                 offrule_blocked += res.offrule_blocked
+                offrule_flagged += res.offrule_flagged
                 passes += res.passes
                 dup_dropped += res.dedup_dropped
                 dup_merged += res.dedup_merged
@@ -700,6 +702,9 @@ def _cmd_consolidate(settings: Settings, args: argparse.Namespace) -> int:
     if offrule_blocked:
         print(f"  ({offrule_blocked} merge(s) refused for adding a different rule — candidate "
               "stored as new instead; -v for which)")
+    if offrule_flagged:
+        print(f"  ({offrule_flagged} merge(s) applied although the merge check said they add a "
+              "different rule — judge_offrule_block = true refuses these; see the warnings)")
     if passes > len(targets) - skipped:
         print(f"  ({passes} extract passes: long sessions were read in several windows)")
     if skipped:
