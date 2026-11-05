@@ -13,7 +13,9 @@ system services; user-space installs + `systemd --user` only.
 | Host | Service | Bind | Purpose |
 |---|---|---|---|
 | Spark `spark-0e81.local` | Ollama | `0.0.0.0:11434` | Qwen embeddings (GPU); reachable on the LAN |
+| Spark `spark-0e81.local` | vLLM (OpenAI API) | `:8000` | **production judge** `qwen3.8-judge` (`chat_url = "http://spark-0e81.local:8000/v1"`) |
 | Spark | qmx MCP (resident) | `0.0.0.0:8765` | shared index served to any client |
+| Second spark `spark-0f50.local` | vLLM | `:8001` | judge experiments (Nemotron 3.5 Super); not production |
 | Mac | qmx MCP (local) | `127.0.0.1:8765` | personal index (Architecture B) |
 
 LAN-only trust model: the `0.0.0.0` binds expose Ollama and the Spark MCP to the local network
@@ -179,21 +181,25 @@ export OLLAMA_HOST=127.0.0.1:11434
   keeps only about half the window, so long sessions were judged on 26-46% of their turns. 64K costs
   the same memory (23 GB) and speed. The judge waits up to `chat_timeout` (default **300 s**);
   `request_timeout` (60 s) stays short because it also bounds the synchronous Stop-hook embed.
-- **Judge on vLLM (second spark).** Set `chat_backend = "openai"`, `chat_url =
-  "http://spark-0f50.local:8000/v1"`, `chat_model = "qwen3.8-judge"` to use Qwen3.8-27B NVFP4 + DFlash2
-  served by vLLM (thinking off, reasoning-first JSON) — blind-graded 6.3 vs 5.1/10 against qwen3.6 on
-  12 sessions (2026-11-03), ~2 min/session. If the judge is unreachable, consolidation is **deferred**,
-  not lost: a pass is only marked consolidated when it finishes, and the nightly `qmx consolidate
-  --all` (launchd, 03:00) picks the turns up. Rollback is config-only (`chat_backend = "ollama"`).
+- **Judge on vLLM (primary spark).** Production runs `chat_backend = "openai"`, `chat_url =
+  "http://spark-0e81.local:8000/v1"`, `chat_model = "qwen3.8-judge"`: Qwen3.8-27B NVFP4 + DFlash2
+  served by vLLM on the **primary** spark (thinking off, reasoning-first JSON) — blind-graded 6.3 vs
+  5.1/10 against qwen3.6 on 12 sessions (2026-11-03), ~2 min/session. The second spark
+  (`spark-0f50.local`) is for judge experiments (Nemotron 3.5 Super, see *Judge filing rules v2*
+  below), not production. Hosts live only in config, never in code. If the judge is unreachable,
+  consolidation is **deferred**, not lost: a pass is only marked consolidated when it finishes, and
+  the nightly `qmx consolidate --all` (launchd, 03:00) picks the turns up. Rollback is config-only
+  (`chat_backend = "ollama"`).
 - **Fixed JSON layout and unusable replies (vLLM judge).** With `response_format`, vLLM's grammar
   allows any whitespace between JSON tokens. When the judge writes an unescaped `"` in a text field,
   the string closes early and greedy decoding emits newlines until the token cap: roughly 1 in 50-100
   real calls, and on 2026-11-03 one such merge check (retried 5 x 300 s) deferred a whole `--all`.
   Every judge prompt now asks for single quotes inside values, and decisions/checks are capped at
-  3072 output tokens. `chat_json_layout = "indent"` (opt-in; default `"schema"` = `response_format`)
-  sends a per-request grammar admitting exactly `json.dumps(indent=2)`, which removes the loop
-  entirely; it stays off until its decoding speed matches xgrammar's own EBNF (3-5x slower in a
-  2026-11-04 check).
+  3072 output tokens (`chat_short_max_tokens`; still capped by `chat_max_tokens`).
+  `chat_json_layout = "indent"` (opt-in; default `"schema"` = `response_format`) sends a
+  per-request grammar admitting exactly `json.dumps(indent=2)`, which removes the loop entirely; it
+  stays off until its decoding speed matches xgrammar's own EBNF (3-5x slower in a 2026-11-04
+  check).
   An unusable reply (cut off at the cap, no reply before the timeout while `/models` still answers,
   or not JSON) fails safe for that one call: decision -> stored as new, merge/retirement check ->
   refused, dedup check -> candidate kept, extract -> its pass stays queued. Three unusable replies in
@@ -212,10 +218,85 @@ export OLLAMA_HOST=127.0.0.1:11434
   Supersede was unguarded until a 2026-11-04 end-to-end eval caught it retiring three lessons the
   sessions supported (#1852, #380, #1142). Replayed through the check, the production judge blocks
   #380 but still "verifies" #1852 and #1142 with a real but non-contradicting quote, so the shared
-  prompt is a first line, not a complete fix; a stricter supersede prompt is a follow-up.
-- **Reasoning-first JSON.** Both judge schemas start with a required `reasoning` string, so the
+  prompt is a first line, not a complete fix; the stricter check is part of filing rules v2 below.
+- **Reasoning-first JSON.** All five judge schemas start with a required `reasoning` string, so the
   model analyses before it decides (thinking stays off). Eval 2026-11-02, 12 sessions blind-graded:
   precision 3.8 vs 3.3/5, +46% judge time, no call over 60 s; Ollama thinking mode was ~10× slower.
+  Essential for Qwen3.8 with thinking off (without it, 2-3 of 11 sessions returned empty lesson
+  lists). `judge_reasoning_field = false` removes the field and its wording from all five calls,
+  for a model that thinks natively.
+- **Judge filing rules v2 (opt-in: `judge_filing_rules = "v2"`; default `"current"`).** In the 12
+  production merges after the Qwen3.8 cutover (2026-11-04/05), 6 did not keep the old lesson's first
+  sentence (5 rewritten, 1 demoted to detail; mostly benign rewordings, but nothing enforced it); a
+  Super run replaced three headlines outright and its own merge check passed all three. v2 changes
+  four things, each active only with `"v2"`:
+  1. **Main rule = first sentence of the statement, computed in code** (`main_rule()`: a leading
+     `[type]` tag stripped, "e.g."/"vs."/"incl." do not end a sentence) and handed to every prompt
+     and check, instead of letting the judge pick a "core claim". Decision and near-duplicate
+     prompts compare main rules, not topics, with an operational same-rule test ("someone who
+     follows the old main rule would do or know the same thing") and "same main rule → `update` or
+     `drop`, not `new`" against over-caution.
+  2. **Headline backstop** (`headline_kept()`), decided in code before the LLM merge check, on both
+     merge paths: the merged statement must begin with the old first sentence (case, whitespace,
+     quotes, backticks, `[type]` tags and dash style ignored; ends on a word boundary). A pure
+     extension or a corrected number passes. A refused decision `update` goes through the
+     near-duplicate check once (whose merge passes the backstop too); a refused near-duplicate merge
+     is dropped. On the eval merges it caught every known clobber and fired 0 times under the v2
+     prompts; under the current prompts it would block about half of Qwen's acceptable rewordings,
+     which is why it ships only with v2.
+  3. **Off-rule block in the merge check.** The judge lists clauses of the merged text that state a
+     different rule than OLD MAIN RULE; any → the merge is refused and the candidate is stored as
+     new (never dropped), on the update and the near-duplicate path. This is the topic-match merge
+     (recommender facts appended to an unrelated CUD lesson). Lost facts and unsupported additions
+     are logged only.
+  4. **Two-quote retirement check.** `supersede`/`deprecate` need the candidate's contradicting
+     words *and* the words of OLD MAIN RULE that become false, both verified verbatim in code.
+  Also: no `[type]` tags or whole-value quote wrapping in judge-written text (stripped in code),
+  and `qmx consolidate` reports `headline_blocked` / `offrule_blocked`. The precursor of these
+  prompts ("rules-v2") replayed the 15 known filing failures cleanly (Qwen3.8 15/15 vs 11/15 with
+  the current prompts; Super 15/15), but Qwen then made 0 merges; the same-rule test above targets
+  that over-caution. The final texts are not validated yet: v2 becomes the default only after the
+  end-to-end validation (Qwen non-regression) in
+  `~/knowledge/qwen-judge-eval/prompt-research/PROPOSAL.md` §C.1 passes.
+- **Judge client settings (all off by default).** With defaults the request body is byte-identical
+  to the validated Qwen3.8 request (tests pin it), so a different judge model is config only:
+
+  | Setting (env) | Default | Effect |
+  |---|---|---|
+  | `chat_temperature` (`QMX_CHAT_TEMPERATURE`) | `0.0` | sampling temperature (vLLM and Ollama) |
+  | `chat_top_p` (`QMX_CHAT_TOP_P`) | `0.0` = not sent | `top_p`, sent only when > 0 |
+  | `chat_template_kwargs` (`QMX_CHAT_TEMPLATE_KWARGS`) | `""` | JSON object (TOML inline table or JSON string) merged over the `enable_thinking`/`reasoning_effort` that `chat_think` computes; the override wins. vLLM only. Invalid JSON fails at startup |
+  | `chat_short_max_tokens` (`QMX_CHAT_SHORT_MAX_TOKENS`) | `3072` | cap of decision / merge / retirement / near-duplicate calls (thinking shares it) |
+  | `judge_reasoning_field` (`QMX_JUDGE_REASONING_FIELD`) | `true` | reasoning-first field in all five calls (true/false, 1/0, yes/no, on/off) |
+  | `judge_filing_rules` (`QMX_JUDGE_FILING_RULES`) | `"current"` | `"current"` or `"v2"` |
+
+  **Nemotron 3.5 Super profile** (experiments on the second spark; server unchanged: vLLM 0.32,
+  Super NVFP4 + LiLiCorr, `--max-model-len 81920`, `nemotron_v3`). Native medium thinking
+  replaces the reasoning field; temperature 0 with thinking gave empty sessions and runaways, full
+  thinking took 25 min/session:
+
+  ```toml
+  chat_backend = "openai"
+  chat_url = "http://spark-0f50.local:8001/v1"
+  chat_model = "nemotron-3.5-super-vl"
+  chat_think = "true"
+  chat_template_kwargs = { enable_thinking = true, medium_effort = true }
+  chat_temperature = 1.0
+  chat_top_p = 0.95
+  chat_max_tokens = 32768
+  chat_short_max_tokens = 16384
+  chat_timeout = 1200
+  chat_json_layout = "schema"
+  judge_reasoning_field = false
+  judge_filing_rules = "v2"
+  ```
+
+  At ~18 tok/s a 16384-token runaway ends at the cap in ~900 s, under the 1200 s timeout; a runaway
+  extract would hit the timeout first and still fail safe (its pass stays queued). Eval harnesses
+  that call `consolidate_session` directly pass `judge=judge_config(settings)` (or
+  `build_judge("v2", reasoning_field=False, short_max_tokens=16384)`); without `judge` it uses the
+  module constants, i.e. today's judge. Under v2 the prompts differ from those constants, so a
+  harness that tells call kinds apart by prompt should compare against `judge.prompts`.
 - **Deferred upgrade (only if v1 lessons are weak):** a `Qwen3.5-122B-A10B` in **NVFP4** on a
   **vLLM** server (NVFP4 ≠ GGUF → not Ollama). Point `chat_model`/`QMX_OLLAMA_URL` at it if built.
   See [`plan/qmx-learnings.md`](./plan/qmx-learnings.md) (*Model decision*).
@@ -234,6 +315,9 @@ Claude Code `settings.json` on the Mac — see the **Learnings** section of [`RE
     It defaults to this value, so the line is optional unless you swap models.
     `chat_num_ctx = 65536` and `chat_timeout = 300` (env `QMX_CHAT_NUM_CTX` / `QMX_CHAT_TIMEOUT`)
     are the judge's context window and timeout; both are defaults, so set them only to override.
+    Production points the judge at vLLM on the primary spark (`chat_backend = "openai"`,
+    `chat_url = "http://spark-0e81.local:8000/v1"`, `chat_model = "qwen3.8-judge"`); sampling,
+    caps and filing rules are the defaults (see *Judge client settings* above).
   - **Reranker (optional):** `rerank_url = "http://spark-0e81.local:8081"` enables the cross-encoder.
 - Claude Code: `claude mcp add --transport http --scope user qmx http://127.0.0.1:8765/mcp`.
 

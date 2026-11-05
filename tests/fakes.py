@@ -110,10 +110,15 @@ class FakeChat:
             self.retire_prompts.append(user)
             if self._retire_checks:
                 return self._retire_checks.pop(0)
-            # Default: the candidate contradicts OLD, quoting the candidate's first line.
+            # Default: the candidate contradicts OLD, quoting the candidate's first line (and, when
+            # the prompt names OLD MAIN RULE — filing rules v2 — that rule as what becomes false).
             marker = "CANDIDATE:\n"
             cand = user.split(marker, 1)[1].split("\n", 1)[0] if marker in user else ""
-            return {"contradicts": True, "contradiction_quote": cand}
+            reply = {"contradicts": True, "contradiction_quote": cand}
+            rule = "OLD MAIN RULE:\n"
+            if rule in user:
+                reply["false_in_old"] = user.split(rule, 1)[1].split("\n", 1)[0]
+            return reply
         self.decision_prompts.append(user)
         return self._decisions.pop(0) if self._decisions else {"action": "new"}
 

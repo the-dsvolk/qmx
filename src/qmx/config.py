@@ -8,6 +8,7 @@ Resolution order (lowest to highest precedence): dataclass defaults → optional
 
 from __future__ import annotations
 
+import json
 import os
 import tomllib
 from dataclasses import asdict, dataclass, fields
@@ -32,6 +33,12 @@ _ENV_MAP = {
     "QMX_CHAT_API_KEY": "chat_api_key",
     "QMX_CHAT_MAX_TOKENS": "chat_max_tokens",
     "QMX_CHAT_JSON_LAYOUT": "chat_json_layout",
+    "QMX_CHAT_TEMPERATURE": "chat_temperature",
+    "QMX_CHAT_TOP_P": "chat_top_p",
+    "QMX_CHAT_TEMPLATE_KWARGS": "chat_template_kwargs",
+    "QMX_CHAT_SHORT_MAX_TOKENS": "chat_short_max_tokens",
+    "QMX_JUDGE_REASONING_FIELD": "judge_reasoning_field",
+    "QMX_JUDGE_FILING_RULES": "judge_filing_rules",
     "QMX_DEDUP_MIN_SIMILARITY": "dedup_min_similarity",
     "QMX_CONSOLIDATE_MIN_TURNS": "consolidate_min_turns",
     "QMX_CONSOLIDATE_MIN_CHARS": "consolidate_min_chars",
@@ -86,7 +93,7 @@ class Settings:
     chat_think: str = "false"
     # Where the judge runs. "ollama" (default) uses ``ollama_url``'s /api/chat; "openai" uses an
     # OpenAI-compatible server (e.g. vLLM) at ``chat_url`` (base URL incl. /v1, e.g.
-    # "http://spark-0f50.local:8000/v1"), with optional bearer ``chat_api_key``.
+    # "http://spark-0e81.local:8000/v1"), with optional bearer ``chat_api_key``.
     chat_backend: str = "ollama"
     chat_url: str = ""
     chat_api_key: str = ""
@@ -100,6 +107,30 @@ class Settings:
     # language (likely the missing string lookahead), so it stays off until that is fixed. Loops
     # under "schema" are bounded by the per-call caps and fail safe (ChatReplyError).
     chat_json_layout: str = "schema"
+    # Judge sampling and chat-template overrides — all off by default, so the request body stays
+    # exactly what the Qwen3.8 judge was validated with (temperature 0, no top_p, thinking per
+    # ``chat_think``). A model that needs other settings (e.g. Nemotron 3.5 Super: temperature 1.0,
+    # top_p 0.95, ``{"enable_thinking": true, "medium_effort": true}``) runs from config alone.
+    # ``chat_top_p`` 0 = not sent. ``chat_template_kwargs`` is a JSON object (a TOML inline table or
+    # a JSON string; stored as a canonical JSON string so Settings stays immutable); its keys are
+    # merged over the ``enable_thinking``/``reasoning_effort`` that ``chat_think`` computes
+    # ("openai" backend only). See INFRA.md for the Super profile.
+    chat_temperature: float = 0.0
+    chat_top_p: float = 0.0
+    chat_template_kwargs: str = ""
+    # Output cap for the short judge calls (decision, merge check, retirement check, dedup check);
+    # still capped by ``chat_max_tokens``. A thinking model needs more: thinking shares the budget.
+    chat_short_max_tokens: int = 3072
+    # Judge prompt wrapper. true (default): every judge schema starts with a required `reasoning`
+    # string and the prompts tell the model to work in it — essential for Qwen3.8 with thinking off
+    # (without it, empty lesson lists). false: field and wording removed from all five calls, for a
+    # model that thinks natively (Super with medium thinking).
+    judge_reasoning_field: bool = True
+    # Judge filing rules: "current" (default) or "v2" — main-rule comparison, a code-computed main
+    # rule (first sentence) in every check, a deterministic headline backstop on merges, an
+    # off-rule-additions block in the merge check and a two-quote retirement check
+    # (qmx.consolidate).
+    judge_filing_rules: str = "current"
     # One-off gate for ``qmx consolidate`` / session-end: sessions with fewer turns or characters
     # than this are skipped (and left un-consolidated so a resumed session can accumulate).
     consolidate_min_turns: int = 8
@@ -183,6 +214,10 @@ class Settings:
         return d
 
 
+_TRUE = frozenset({"true", "1", "yes", "on"})
+_FALSE = frozenset({"false", "0", "no", "off"})
+
+
 def _coerce_value(name: str, raw: object) -> object:
     if name == "db_path":
         return Path(raw).expanduser() if not isinstance(raw, Path) else raw
@@ -192,8 +227,49 @@ def _coerce_value(name: str, raw: object) -> object:
     if name in {
         "embed_dim", "embed_batch_size", "max_retries", "mcp_port", "parked_stale_days",
         "chat_num_ctx", "consolidate_min_turns", "consolidate_min_chars", "chat_max_tokens",
+        "chat_short_max_tokens",
     }:
         return int(raw)
-    if name in {"request_timeout", "retry_base_delay", "chat_timeout", "dedup_min_similarity"}:
+    if name in {
+        "request_timeout", "retry_base_delay", "chat_timeout", "dedup_min_similarity",
+        "chat_temperature", "chat_top_p",
+    }:
         return float(raw)
+    if name == "judge_reasoning_field":
+        return _coerce_bool(name, raw)
+    if name == "chat_template_kwargs":
+        return template_kwargs_json(raw)
     return str(raw)
+
+
+def _coerce_bool(name: str, raw: object) -> bool:
+    if isinstance(raw, bool):
+        return raw
+    v = str(raw).strip().lower()
+    if v in _TRUE:
+        return True
+    if v in _FALSE:
+        return False
+    raise ValueError(f"{name} must be true or false (or 1/0, yes/no, on/off), got {raw!r}")
+
+
+def template_kwargs_json(raw: object) -> str:
+    """Canonical JSON string for ``chat_template_kwargs``; "" when unset.
+
+    Accepts a mapping (a TOML inline table) or a string holding a JSON object; anything else —
+    including invalid JSON or a JSON value that is not an object — raises ``ValueError``.
+    """
+    if raw is None:
+        return ""
+    if isinstance(raw, dict):
+        return json.dumps(raw)
+    text = str(raw).strip()
+    if not text:
+        return ""
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"chat_template_kwargs is not valid JSON: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"chat_template_kwargs must be a JSON object, got {text!r}")
+    return json.dumps(value)
