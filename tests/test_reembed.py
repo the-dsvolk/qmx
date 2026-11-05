@@ -115,3 +115,43 @@ def test_cli_reembed_converts_a_copy(tmp_path, monkeypatch, capsys):
     assert f"re-embedded {chunks} of {chunks} chunk(s)" in capsys.readouterr().out
     assert _meta(copy)["embed_model"] == "new-model"
     assert _meta(db)["embed_model"] == "old-model"
+
+
+def test_reembed_reuses_vectors_from_an_earlier_conversion(tmp_path):
+    db, chunks = _build(tmp_path)
+    first = tmp_path / "first.db"
+    _backup(db, first)
+    reembed(first, FakeEmbedder(dim=32), "new-model")
+
+    # The live index moves on: one more file indexed after the first conversion.
+    (tmp_path / "repo" / "extra.py").write_text("def brand_new_helper():\n    return 42\n")
+    with Store.open(db, 64, "old-model") as store:
+        index_paths([tmp_path / "repo"], store, FakeEmbedder(dim=64))
+        grown = store.counts()["chunks"]
+    assert grown > chunks
+
+    final = tmp_path / "final.db"
+    _backup(db, final)
+    again = CountingEmbedder(dim=32)
+    stats = reembed(final, again, "new-model", reuse_from=first)
+    assert stats.reused == chunks
+    assert again.embedded == stats.embedded == grown - chunks
+    with Store.open(final, 32, "new-model") as store:
+        assert store.counts()["vectors"] == grown
+        hits = search(store, again, "brand new helper", k=3)
+        assert hits and hits[0].hit.path.endswith("extra.py")
+
+
+def test_reembed_rejects_a_reuse_index_of_another_model(tmp_path):
+    db, _ = _build(tmp_path)
+    copy = tmp_path / "copy.db"
+    _backup(db, copy)
+    with pytest.raises(ValueError, match="holds 'old-model'"):
+        reembed(copy, FakeEmbedder(dim=32), "new-model", reuse_from=db)
+
+
+def _backup(src_path: Path, dst_path: Path) -> None:
+    src, dst = sqlite3.connect(src_path), sqlite3.connect(dst_path)
+    src.backup(dst)
+    src.close()
+    dst.close()

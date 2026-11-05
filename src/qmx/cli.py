@@ -306,6 +306,7 @@ def _cmd_reembed(settings: Settings, args: argparse.Namespace) -> int:
                 settings.embed_model,
                 commit_every=args.commit_every,
                 progress=progress,
+                reuse_from=Path(args.reuse).expanduser() if args.reuse else None,
             )
     except (StoreSchemaMismatch, EmbedBackendError, ValueError) as exc:
         print(f"reembed failed: {exc}", file=sys.stderr)
@@ -318,7 +319,8 @@ def _cmd_reembed(settings: Settings, args: argparse.Namespace) -> int:
     print(
         f"re-embedded {stats.embedded} of {stats.chunks_total} chunk(s) with "
         f"{settings.embed_model!r} (dim {settings.embed_dim}) in "
-        f"{time.monotonic() - started:.0f}s; {stats.already_embedded} already done; {table}"
+        f"{time.monotonic() - started:.0f}s; {stats.reused} reused, "
+        f"{stats.already_embedded} already done; {table}"
     )
     return 0
 
@@ -1065,6 +1067,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_reembed.add_argument(
         "--commit-every", type=int, default=DEFAULT_COMMIT_EVERY, help="chunks per transaction"
+    )
+    p_reembed.add_argument(
+        "--reuse",
+        help="index already converted to this model/dim: copy vectors for unchanged chunks from it",
     )
 
     p_serve = sub.add_parser("serve", help="run the resident MCP server")

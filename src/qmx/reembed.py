@@ -14,6 +14,11 @@ model in ``meta``; a rerun on a DB whose ``meta`` already names the new model an
 chunks that have no vector yet. Run it on a *copy* (``sqlite3 index.db ".backup copy.db"``) and
 switch ``db_path`` once the copy is checked — the store refuses to open a DB whose ``meta`` does not
 match the configured model, so the live index cannot be half-converted by accident.
+
+``reuse_from`` names an index already converted to the same model and width (e.g. the copy built
+and checked earlier): vectors for chunks with the same content hash are copied from it instead of
+re-embedded. That makes the cutover catch-up — a fresh copy of the live index taken with the
+services stopped — cost only the chunks added since the first copy.
 """
 
 from __future__ import annotations
@@ -36,6 +41,7 @@ class ReembedStats:
     chunks_total: int = 0
     already_embedded: int = 0
     embedded: int = 0
+    reused: int = 0
     rebuilt_table: bool = False
     old_model: str = ""
     old_dim: int = 0
@@ -48,12 +54,14 @@ def reembed(
     *,
     commit_every: int = DEFAULT_COMMIT_EVERY,
     progress: Callable[[int, int], None] | None = None,
+    reuse_from: Path | str | None = None,
 ) -> ReembedStats:
     """Rebuild ``vec_chunks`` in ``db_path`` with ``embedder`` (recorded in ``meta`` as ``model``).
 
-    ``progress(done, todo)`` is called after each committed batch.
+    ``progress(done, todo)`` is called after each committed batch. ``reuse_from``: see module doc.
     """
     conn = sqlite3.connect(str(db_path))
+    reuse = _open_reuse(reuse_from, model, embedder.dim) if reuse_from is not None else None
     try:
         load_sqlite_vec(conn)
         conn.execute("PRAGMA busy_timeout=5000")
@@ -86,27 +94,64 @@ def reembed(
         stats.chunks_total = len(all_ids)
         stats.already_embedded = len(all_ids) - len(todo)
 
+        done = 0
         for start in range(0, len(todo), commit_every):
             ids = todo[start : start + commit_every]
             marks = ",".join("?" * len(ids))
-            text_by_id = dict(
-                conn.execute(f"SELECT chunk_id, text FROM chunks WHERE chunk_id IN ({marks})", ids)
-            )
-            vectors = embedder.embed([text_by_id[cid] for cid in ids])
-            for vec in vectors:
+            rows = conn.execute(
+                f"SELECT chunk_id, chunk_hash, text FROM chunks WHERE chunk_id IN ({marks})", ids
+            ).fetchall()
+            blobs: dict[int, bytes] = {}
+            if reuse is not None:
+                by_hash = _reuse_blobs(reuse, [h for _, h, _ in rows])
+                blobs = {cid: by_hash[h] for cid, h, _ in rows if h in by_hash}
+            fresh = [(cid, text) for cid, _, text in rows if cid not in blobs]
+            vectors = embedder.embed([text for _, text in fresh])
+            for (cid, _), vec in zip(fresh, vectors, strict=True):
                 if len(vec) != dim:
                     raise ValueError(f"embedding dim {len(vec)} != {dim}")
+                blobs[cid] = sqlite_vec.serialize_float32(list(vec))
             with conn:
                 conn.executemany(
-                    "INSERT INTO vec_chunks(chunk_id, embedding) VALUES(?, ?)",
-                    [
-                        (cid, sqlite_vec.serialize_float32(list(vec)))
-                        for cid, vec in zip(ids, vectors, strict=True)
-                    ],
+                    "INSERT INTO vec_chunks(chunk_id, embedding) VALUES(?, ?)", blobs.items()
                 )
-            stats.embedded += len(ids)
+            stats.embedded += len(fresh)
+            stats.reused += len(rows) - len(fresh)
+            done += len(rows)
             if progress is not None:
-                progress(stats.embedded, len(todo))
+                progress(done, len(todo))
         return stats
     finally:
         conn.close()
+        if reuse is not None:
+            reuse.close()
+
+
+def _open_reuse(path: Path | str, model: str, dim: int) -> sqlite3.Connection:
+    """Read-only handle on an index already converted to ``model``/``dim``."""
+    if not Path(path).is_file():
+        raise ValueError(f"reuse index not found: {path}")
+    rc = sqlite3.connect(f"file:{Path(path).resolve()}?mode=ro", uri=True)
+    load_sqlite_vec(rc)
+    meta = dict(rc.execute("SELECT key, value FROM meta").fetchall())
+    if meta.get("embed_model") != model or int(meta.get("embed_dim", 0) or 0) != dim:
+        rc.close()
+        raise ValueError(
+            f"reuse index {path} holds {meta.get('embed_model')!r}/dim {meta.get('embed_dim')}, "
+            f"not {model!r}/dim {dim}"
+        )
+    return rc
+
+
+def _reuse_blobs(rc: sqlite3.Connection, hashes: list[str]) -> dict[str, bytes]:
+    """``chunk_hash -> stored vector blob`` for the hashes the reuse index has a vector for."""
+    if not hashes:
+        return {}
+    marks = ",".join("?" * len(hashes))
+    return dict(
+        rc.execute(
+            f"SELECT c.chunk_hash, v.embedding FROM chunks c "
+            f"JOIN vec_chunks v ON v.chunk_id = c.chunk_id WHERE c.chunk_hash IN ({marks})",
+            hashes,
+        )
+    )

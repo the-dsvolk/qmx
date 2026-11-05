@@ -85,8 +85,46 @@ Guidance:
   `mxbai-embed-large`, `bge-m3`) as long as `embed_dim` matches.
 - **The model and dim are baked into the index.** qmx records them and **refuses to open an index
   built with a different model/dim** (it tells you to rebuild). So changing the embedding model means
-  re-embedding: `rm` the DB (or use a fresh `QMX_DB_PATH`) and re-`qmx index`.
+  re-embedding — use `qmx reembed` (below), **not** `rm` + re-`qmx index`: re-indexing re-reads the
+  source files, and Claude Code prunes old transcripts, so chats whose files are gone would be lost.
 - **Use the same model for indexing and querying** — mismatched vector spaces return garbage.
+
+#### An OpenAI-compatible server (vLLM) instead of Ollama
+
+`embed_backend = "openai"` posts to `/v1/embeddings` at `embed_url`. Asymmetric models need their
+query/document prefixes; Matryoshka models can be cut to a smaller `embed_dim` (re-normalised
+client-side). Nemotron-3-Embed-1B on vLLM, for example:
+
+```toml
+embed_backend        = "openai"
+embed_url            = "http://spark-0f50.local:8002/v1"
+embed_model          = "nemotron-3-embed-1b"   # vLLM --served-model-name
+embed_dim            = 1024                    # model emits 2048; first 1024, re-normalised
+embed_query_prefix   = "query: "               # search queries
+embed_passage_prefix = "passage: "             # everything stored + doc-vs-doc checks
+embed_max_tokens     = 8192                    # vLLM truncate_prompt_tokens for long chunks
+```
+
+The prefixes default to empty, which is what the Qwen index was built with. The similarity cut-offs
+`dedup_min_similarity` and `parked_similar_max_distance` are model-specific — recalibrate them when
+the model changes.
+
+#### Switching models without losing anything: `qmx reembed`
+
+Every chunk's text is stored in the index, so only the vector table has to be rebuilt:
+
+```bash
+sqlite3 ~/.qmx/index.db ".backup ~/.qmx/index-new.db"     # consistent copy of the live index
+QMX_CONFIG=new.toml qmx reembed --db ~/.qmx/index-new.db  # new model's vectors; resumable
+# ...check it with QMX_CONFIG=new.toml (db_path = the copy). Then, with the services stopped:
+sqlite3 ~/.qmx/index.db ".backup ~/.qmx/index-final.db"   # catch up on what changed since
+QMX_CONFIG=new.toml qmx reembed --db ~/.qmx/index-final.db --reuse ~/.qmx/index-new.db
+# point db_path (and the embed_* keys) at the final copy, start the services
+```
+
+`--reuse` copies vectors for unchanged chunks (same content hash) from the earlier conversion, so the
+catch-up only embeds what was added since. `reembed` refuses the configured `db_path` itself unless
+you pass `--in-place`.
 
 ## 4. Index a repo and search it
 
