@@ -46,7 +46,9 @@ add on-the-fly chat capture.
   account, so commits attribute to it (not the separate `dsovlk` account) and no real email lands in
   public history. Do **not** use a corporate email.
 
-> Status: scaffolding; plan complete, code not yet landed. Approach **decided** — from-scratch
-> (not a qmd fork); model hosting on the Spark (Ollama embeddings, vLLM judge); Mac-dev /
-> Spark-prod split. See `plan/` (esp. `qmx-deployment.md`) for the design; build follows the
-> phasing in `plan/qmx-plan.md`.
+> Status: in daily use — indexing, hybrid search + rerank, the MCP server, chat memory, learnings
+> and nightly consolidation have all landed (README "Status"); the consolidation judge is still
+> being tuned (filing rules v2 is opt-in). Approach: from-scratch (not a qmd fork); models on the
+> Spark (Ollama embeddings, llama.cpp reranker, vLLM judge); the qmx MCP server, index and
+> nightly jobs run on the Mac, with a Spark-hosted server as the alternative. `plan/` holds the
+> original design records (esp. `qmx-deployment.md`, `qmx-plan.md`).
