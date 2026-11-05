@@ -296,10 +296,12 @@ that rules out runaway whitespace.
 
 **Judge client settings (opt-in).** `chat_temperature` (0.0), `chat_top_p` (0 = not sent),
 `chat_template_kwargs` (a JSON object merged into vLLM's chat-template kwargs),
-`chat_short_max_tokens` (3072), `judge_reasoning_field` (true) and `judge_filing_rules`
-(`"current"` | `"v2"`) let a different judge model run from config alone. The defaults are the
-validated Qwen3.8 judge's request exactly; production keeps `judge_filing_rules = "current"`, and
-`"v2"` is an experimental rule set still being tuned. See [`INFRA.md`](./INFRA.md) for details.
+`chat_short_max_tokens` (3072), `judge_reasoning_field` (true), `judge_filing_rules`
+(`"current"` | `"v2"`) and `judge_offrule_block` (false) let a different judge model run from config
+alone. The defaults are the validated Qwen3.8 judge's request exactly (`"current"` rules). Since
+2026-11-05 production runs a trial of `judge_filing_rules = "v2"` with `chat_short_max_tokens = 6144`
+(set in config; rollback = delete the two lines); v2 becomes the code default only after a blind
+review. See [`INFRA.md`](./INFRA.md) for details.
 
 **Hooks** (optional, wire in `settings.json` like the `Stop`/capture hook) — inject at start,
 consolidate at end (the latter runs detached so it never blocks session close):

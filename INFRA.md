@@ -284,8 +284,11 @@ Qwen3-Coder-Next were removed from Ollama on 2026-11-05.
   lessons (an unusable reply refuses the merge). The precursor of these
   prompts ("rules-v2") replayed the 15 known filing failures cleanly (Qwen3.8 15/15 vs 11/15 with
   the current prompts; Super 15/15), but Qwen then made 0 merges; the same-rule test above targets
-  that over-caution. The final texts are not validated yet: v2 becomes the default only after the
-  end-to-end validation (Qwen non-regression) in
+  that over-caution. A lean validation after the PR #41 tuning (Qwen3.8, `chat_short_max_tokens =
+  6144`) passed every replay bar except the decision path (4/7 should-merge cases merged), with 0
+  headline rewrites and 0 wrong retirements; production has run v2 as a config-only trial since
+  2026-11-05 (`judge_filing_rules = "v2"`, `chat_short_max_tokens = 6144`). v2 becomes the code
+  default only after the end-to-end blind review (Qwen non-regression) in
   `~/knowledge/qwen-judge-eval/prompt-research/PROPOSAL.md` §C.1 passes.
 - **Judge client settings (all off by default).** With defaults the request body is byte-identical
   to the validated Qwen3.8 request (tests pin it), so a different judge model is config only:
