@@ -13,6 +13,7 @@ import argparse
 import json
 import logging
 import sys
+import time
 from pathlib import Path
 
 from qmx.capture import capture
@@ -22,8 +23,8 @@ from qmx.consolidate import consolidate_session, judge_config
 from qmx.embed import (
     CircuitBreakerEmbedder,
     EmbedBackendError,
-    OllamaEmbedder,
-    ping_ollama,
+    make_embedder,
+    ping_embedder,
     read_embedder,
 )
 from qmx.index import (
@@ -47,6 +48,7 @@ from qmx.learnings import (
 )
 from qmx.parked import ParkedNotFound, ParkedRepo, sync_index
 from qmx.promote import PromotionError, promotable, promote
+from qmx.reembed import DEFAULT_COMMIT_EVERY, reembed
 from qmx.rerank import make_reranker
 from qmx.scope import canonical_repo_key
 from qmx.search import search
@@ -80,7 +82,8 @@ def _cmd_status(settings: Settings, args: argparse.Namespace) -> int:
         info["index_error"] = str(exc)
     # Whether the model backend is up decides what still works: with it down, reads degrade to
     # BM25-only and indexing/consolidation have to wait.
-    info["ollama_ok"] = ping_ollama(settings)
+    info["embed_ok"] = ping_embedder(settings)
+    info["ollama_ok"] = info["embed_ok"]  # historical name, kept for scripts that read it
     print(json.dumps(info, indent=2))
     return 0
 
@@ -92,7 +95,7 @@ def _cmd_index(settings: Settings, args: argparse.Namespace) -> int:
         print(f"no such path(s): {', '.join(missing)}", file=sys.stderr)
         return 2
     try:
-        with _open_store(settings) as store, OllamaEmbedder(settings) as embedder:
+        with _open_store(settings) as store, make_embedder(settings) as embedder:
             stats = index_paths(paths, store, embedder, force=args.force)
     except (StoreSchemaMismatch, EmbedBackendError) as exc:
         print(f"index failed: {exc}", file=sys.stderr)
@@ -114,7 +117,7 @@ def _cmd_backfill_chats(settings: Settings, args: argparse.Namespace) -> int:
         print(f"no such projects dir: {projects}", file=sys.stderr)
         return 2
     try:
-        with _open_store(settings) as store, OllamaEmbedder(settings) as embedder:
+        with _open_store(settings) as store, make_embedder(settings) as embedder:
             stats = backfill_chats(projects, store, embedder, force=args.force, source=args.source)
     except (StoreSchemaMismatch, EmbedBackendError) as exc:
         print(f"backfill-chats failed: {exc}", file=sys.stderr)
@@ -145,7 +148,7 @@ def _cmd_index_meeting(settings: Settings, args: argparse.Namespace) -> int:
         print(f"not a Memoir call folder (no meeting.json): {folder}", file=sys.stderr)
         return 2
     try:
-        with _open_store(settings) as store, OllamaEmbedder(settings) as embedder:
+        with _open_store(settings) as store, make_embedder(settings) as embedder:
             stats = index_meeting(folder, store, embedder, force=args.force)
     except (StoreSchemaMismatch, EmbedBackendError) as exc:
         print(f"index-meeting failed: {exc}", file=sys.stderr)
@@ -160,7 +163,7 @@ def _cmd_backfill_meetings(settings: Settings, args: argparse.Namespace) -> int:
         print(f"no such directory: {save_dir}", file=sys.stderr)
         return 2
     try:
-        with _open_store(settings) as store, OllamaEmbedder(settings) as embedder:
+        with _open_store(settings) as store, make_embedder(settings) as embedder:
             stats = backfill_meetings(save_dir, store, embedder, force=args.force)
     except (StoreSchemaMismatch, EmbedBackendError) as exc:
         print(f"backfill-meetings failed: {exc}", file=sys.stderr)
@@ -196,7 +199,7 @@ def _cmd_refresh(settings: Settings, args: argparse.Namespace) -> int:
         print(f"code_roots not found: {', '.join(missing)}", file=sys.stderr)
         return 2
     try:
-        with _open_store(settings) as store, OllamaEmbedder(settings) as embedder:
+        with _open_store(settings) as store, make_embedder(settings) as embedder:
             code = index_paths(roots, store, embedder, force=args.force)
             chats = backfill_chats(DEFAULT_PROJECTS_DIR, store, embedder, force=args.force)
             mem = index_memory(settings.memory_globs, store, embedder, force=args.force)
@@ -218,7 +221,7 @@ def _cmd_refresh(settings: Settings, args: argparse.Namespace) -> int:
 
 def _cmd_index_memory(settings: Settings, args: argparse.Namespace) -> int:
     try:
-        with _open_store(settings) as store, OllamaEmbedder(settings) as embedder:
+        with _open_store(settings) as store, make_embedder(settings) as embedder:
             stats = index_memory(settings.memory_globs, store, embedder, force=args.force)
     except (StoreSchemaMismatch, EmbedBackendError) as exc:
         print(f"index-memory failed: {exc}", file=sys.stderr)
@@ -249,7 +252,7 @@ def _cmd_watch(settings: Settings, args: argparse.Namespace) -> int:
         print(f"no such path(s): {', '.join(missing)}", file=sys.stderr)
         return 2
     try:
-        with _open_store(settings) as store, OllamaEmbedder(settings) as embedder:
+        with _open_store(settings) as store, make_embedder(settings) as embedder:
             print(f"watching {', '.join(str(p) for p in paths)} — Ctrl-C to stop")
             watch(paths, store, embedder)
     except StoreSchemaMismatch as exc:
@@ -266,6 +269,57 @@ def _cmd_gc(settings: Settings, args: argparse.Namespace) -> int:
         print(f"gc failed: {exc}", file=sys.stderr)
         return 1
     print(f"purged {purged} tombstoned chunk(s)")
+    return 0
+
+
+def _cmd_reembed(settings: Settings, args: argparse.Namespace) -> int:
+    db = Path(args.db).expanduser().resolve()
+    if not db.is_file():
+        print(f"no such index: {db}", file=sys.stderr)
+        return 2
+    if db == Path(settings.db_path).expanduser().resolve() and not args.in_place:
+        print(
+            f"refusing to re-embed the configured index {db} in place: run it on a copy "
+            f'(sqlite3 {db} ".backup <copy>") and switch db_path after checking it, '
+            "or pass --in-place",
+            file=sys.stderr,
+        )
+        return 2
+    started = last = time.monotonic()
+
+    def progress(done: int, todo: int) -> None:
+        nonlocal last
+        now = time.monotonic()
+        if now - last >= 10 or done == todo:
+            last = now
+            rate = done / max(now - started, 1e-9)
+            eta = (todo - done) / rate if rate else 0.0
+            print(
+                f"  {done}/{todo} chunks, {rate:.0f}/s, ~{eta / 60:.1f} min left", file=sys.stderr
+            )
+
+    try:
+        with make_embedder(settings) as embedder:
+            stats = reembed(
+                db,
+                embedder,
+                settings.embed_model,
+                commit_every=args.commit_every,
+                progress=progress,
+            )
+    except (StoreSchemaMismatch, EmbedBackendError, ValueError) as exc:
+        print(f"reembed failed: {exc}", file=sys.stderr)
+        return 1
+    table = (
+        f"vector table rebuilt (was {stats.old_model!r}/dim {stats.old_dim})"
+        if stats.rebuilt_table
+        else "resumed"
+    )
+    print(
+        f"re-embedded {stats.embedded} of {stats.chunks_total} chunk(s) with "
+        f"{settings.embed_model!r} (dim {settings.embed_dim}) in "
+        f"{time.monotonic() - started:.0f}s; {stats.already_embedded} already done; {table}"
+    )
     return 0
 
 
@@ -347,7 +401,7 @@ def _cmd_query(settings: Settings, args: argparse.Namespace) -> int:
 
 def _cmd_add_learning(settings: Settings, args: argparse.Namespace) -> int:
     try:
-        with _open_store(settings) as store, OllamaEmbedder(settings) as embedder:
+        with _open_store(settings) as store, make_embedder(settings) as embedder:
             learning_id = add_learning(
                 store,
                 embedder,
@@ -382,7 +436,7 @@ def _cmd_update_learning(settings: Settings, args: argparse.Namespace) -> int:
         print("update-learning: nothing to change (pass at least one field)", file=sys.stderr)
         return 2
     try:
-        with _open_store(settings) as store, OllamaEmbedder(settings) as embedder:
+        with _open_store(settings) as store, make_embedder(settings) as embedder:
             learning = update_learning(store, embedder, args.id, **patch)
     except (StoreSchemaMismatch, EmbedBackendError, ValueError) as exc:
         print(f"update-learning failed: {exc}", file=sys.stderr)
@@ -457,7 +511,7 @@ def _cmd_learning_history(settings: Settings, args: argparse.Namespace) -> int:
 def _cmd_revert_learning(settings: Settings, args: argparse.Namespace) -> int:
     """Restore a lesson from its revision history (default: undo the latest update)."""
     try:
-        with _open_store(settings) as store, OllamaEmbedder(settings) as embedder:
+        with _open_store(settings) as store, make_embedder(settings) as embedder:
             learning = revert_learning(store, embedder, args.id, args.revision)
     except (StoreSchemaMismatch, EmbedBackendError, ValueError) as exc:
         print(f"revert-learning failed: {exc}", file=sys.stderr)
@@ -624,7 +678,7 @@ def _cmd_consolidate(settings: Settings, args: argparse.Namespace) -> int:
         judge = judge_config(settings)
         with (
             _open_store(settings) as store,
-            OllamaEmbedder(settings) as embedder,
+            make_embedder(settings) as embedder,
             make_chat(settings) as chat,
         ):
             targets: list[int] = []
@@ -1001,6 +1055,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_remove.add_argument("path", help="file or directory to drop from the index")
 
     sub.add_parser("gc", help="purge tombstoned (unreferenced) chunks")
+    p_reembed = sub.add_parser(
+        "reembed",
+        help="rebuild an index copy's vectors with the configured embedding model (resumable)",
+    )
+    p_reembed.add_argument("--db", required=True, help="index file to convert (use a copy)")
+    p_reembed.add_argument(
+        "--in-place", action="store_true", help="allow converting the configured db_path itself"
+    )
+    p_reembed.add_argument(
+        "--commit-every", type=int, default=DEFAULT_COMMIT_EVERY, help="chunks per transaction"
+    )
 
     p_serve = sub.add_parser("serve", help="run the resident MCP server")
     p_serve.add_argument(
@@ -1043,6 +1108,7 @@ _COMMANDS = {
     "sources": _cmd_sources,
     "remove": _cmd_remove,
     "gc": _cmd_gc,
+    "reembed": _cmd_reembed,
     "serve": _cmd_serve,
 }
 

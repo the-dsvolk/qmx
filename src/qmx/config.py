@@ -22,6 +22,11 @@ _ENV_MAP = {
     "QMX_OLLAMA_URL": "ollama_url",
     "QMX_DB_PATH": "db_path",
     "QMX_EMBED_MODEL": "embed_model",
+    "QMX_EMBED_BACKEND": "embed_backend",
+    "QMX_EMBED_URL": "embed_url",
+    "QMX_EMBED_QUERY_PREFIX": "embed_query_prefix",
+    "QMX_EMBED_PASSAGE_PREFIX": "embed_passage_prefix",
+    "QMX_EMBED_MAX_TOKENS": "embed_max_tokens",
     "QMX_RERANK_URL": "rerank_url",
     "QMX_RERANK_MODEL": "rerank_model",
     "QMX_CHAT_MODEL": "chat_model",
@@ -56,6 +61,7 @@ _ENV_MAP = {
     "QMX_PROMOTED_MEMORY_ROOT": "promoted_memory_root",
     "QMX_PARKED_ROOT": "parked_root",
     "QMX_PARKED_STALE_DAYS": "parked_stale_days",
+    "QMX_PARKED_SIMILAR_MAX_DISTANCE": "parked_similar_max_distance",
 }
 
 # Where Claude memory lives. Globs (``~`` expanded) matching memory dirs or .md files; a dir match
@@ -69,6 +75,22 @@ class Settings:
 
     # Model backend (Ollama). On the Mac this points at the Spark; on the Spark, localhost.
     ollama_url: str = "http://localhost:11434"
+
+    # Embedding backend. "ollama" (default) posts to ``ollama_url``'s /api/embed. "openai" posts to
+    # an OpenAI-compatible /v1/embeddings server (vLLM) at ``embed_url`` (base URL incl. /v1), e.g.
+    # Nemotron-3-Embed-1B: "http://spark-0f50.local:8002/v1". Changing the model means re-embedding
+    # the index (``qmx reembed``); ``meta`` refuses a DB built with a different model or dim.
+    embed_backend: str = "ollama"
+    embed_url: str = ""
+    # Asymmetric retrieval prefixes, prepended client-side (qmx.embed). ``embed_query_prefix`` goes
+    # on search queries; ``embed_passage_prefix`` on everything stored and on the doc-vs-doc checks
+    # (insert-time dedup, similar parked items). Empty (default) = text sent as-is, which is what
+    # the Qwen index was built with. Nemotron Embed needs "query: " / "passage: ".
+    embed_query_prefix: str = ""
+    embed_passage_prefix: str = ""
+    # "openai" backend only: vLLM ``truncate_prompt_tokens``, so an over-long chunk is cut to this
+    # many tokens server-side instead of rejected. 0 = not sent.
+    embed_max_tokens: int = 0
 
     # Where the single, rebuildable index lives (on the Spark in prod).
     db_path: Path = DEFAULT_DB_PATH
@@ -154,7 +176,8 @@ class Settings:
     mcp_host: str = "127.0.0.1"
     mcp_port: int = 8765
 
-    # Embedding dimensionality — must match the served model; stored in ``meta`` so a mismatch
+    # Embedding dimensionality — must match the served model (or, for the "openai" backend, be at
+    # most its width: wider vectors are cut and re-normalised); stored in ``meta`` so a mismatch
     # forces a rebuild rather than silently corrupting the vector table.
     embed_dim: int = 1024
 
@@ -183,6 +206,9 @@ class Settings:
     # flagged for a keep-or-drop review (never auto-archived). See ``plan/qmx-parked.md``.
     parked_root: str = "~/.qmx/parked"
     parked_stale_days: int = 30
+    # Cosine distance under which another open parked item counts as "similar" (a dedup hint on
+    # park). Model-specific: recalibrate when the embedding model changes.
+    parked_similar_max_distance: float = 0.3
 
     @classmethod
     def load(cls, config_path: Path | None = None, env: dict[str, str] | None = None) -> Settings:
@@ -234,12 +260,12 @@ def _coerce_value(name: str, raw: object) -> object:
     if name in {
         "embed_dim", "embed_batch_size", "max_retries", "mcp_port", "parked_stale_days",
         "chat_num_ctx", "consolidate_min_turns", "consolidate_min_chars", "chat_max_tokens",
-        "chat_short_max_tokens",
+        "chat_short_max_tokens", "embed_max_tokens",
     }:
         return int(raw)
     if name in {
         "request_timeout", "retry_base_delay", "chat_timeout", "dedup_min_similarity",
-        "chat_temperature", "chat_top_p",
+        "chat_temperature", "chat_top_p", "parked_similar_max_distance",
     }:
         return float(raw)
     if name in {"judge_reasoning_field", "judge_offrule_block"}:

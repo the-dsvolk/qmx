@@ -151,7 +151,7 @@ def test_cli_reports_blocked_supersedes(tmp_path, monkeypatch, capsys):
                     decisions=[{**SUPERSEDE, "action": "supersede", "target_id": target}],
                     retire_checks=[REFUSE], dup_checks=[SAME_LESSON])  # fmt: skip
     monkeypatch.setattr(Settings, "load", classmethod(lambda cls, *a, **k: settings))
-    monkeypatch.setattr(cli, "OllamaEmbedder", lambda _s: contextlib.nullcontext(embedder))
+    monkeypatch.setattr(cli, "make_embedder", lambda _s: contextlib.nullcontext(embedder))
     monkeypatch.setattr(cli, "make_chat", lambda _s: contextlib.nullcontext(chat))
     assert cli.main(["consolidate", "--session", str(session), "--scope", SCOPE]) == 0
     out = capsys.readouterr().out

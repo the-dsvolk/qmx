@@ -259,11 +259,7 @@ class Store:
             CREATE INDEX idx_mentions_chunk ON mentions(chunk_id);
             """
         )
-        c.execute(
-            "CREATE VIRTUAL TABLE vec_chunks USING vec0("
-            "chunk_id INTEGER PRIMARY KEY, "
-            f"embedding float[{self._embed_dim}] distance_metric=cosine)"
-        )
+        create_vec_table(c, self._embed_dim)
         c.execute("CREATE VIRTUAL TABLE fts_chunks USING fts5(text)")
         c.execute("INSERT INTO meta(key, value) VALUES('embed_dim', ?)", (str(self._embed_dim),))
         c.execute("INSERT INTO meta(key, value) VALUES('embed_model', ?)", (self._embed_model,))
@@ -1066,6 +1062,20 @@ def _fts_match_query(text: str) -> str | None:
     if not tokens:
         return None
     return " OR ".join(f'"{t}"' for t in tokens)
+
+
+def create_vec_table(conn: sqlite3.Connection, embed_dim: int) -> None:
+    """The ``vec_chunks`` ANN table (cosine). Shared by schema creation and ``qmx reembed``."""
+    conn.execute(
+        "CREATE VIRTUAL TABLE vec_chunks USING vec0("
+        "chunk_id INTEGER PRIMARY KEY, "
+        f"embedding float[{int(embed_dim)}] distance_metric=cosine)"
+    )
+
+
+def load_sqlite_vec(conn: sqlite3.Connection) -> None:
+    """Load the sqlite-vec extension into ``conn``."""
+    _load_sqlite_vec(conn)
 
 
 def _load_sqlite_vec(conn: sqlite3.Connection) -> None:

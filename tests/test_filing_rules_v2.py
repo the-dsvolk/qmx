@@ -665,7 +665,7 @@ def _cli(tmp_path, monkeypatch, settings_kw, decision):
                             decisions=[{**decision, "target_id": target}],
                             dup_checks=[{"same_lesson": False}]))
     monkeypatch.setattr(Settings, "load", classmethod(lambda cls, *a, **k: settings))
-    monkeypatch.setattr(cli, "OllamaEmbedder", lambda _s: contextlib.nullcontext(embedder))
+    monkeypatch.setattr(cli, "make_embedder", lambda _s: contextlib.nullcontext(embedder))
     monkeypatch.setattr(cli, "make_chat", lambda _s: contextlib.nullcontext(rec))
     code = cli.main(["consolidate", "--session", str(session), "--scope", SCOPE])
     return code, rec
