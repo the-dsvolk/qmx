@@ -48,7 +48,7 @@ def _from_other_thread(fn, *args) -> None:
 def test_relay_applies_observer_thread_events_on_the_store_thread(tmp_path, caplog):
     embedder = FakeEmbedder(dim=64)
     with Store.open(tmp_path / "index.db", embedder.dim, "fake") as store:
-        handler = CodeChangeHandler(store, embedder)
+        handler = CodeChangeHandler(store, embedder, [tmp_path])
         relay = EventRelay()
         alpha, beta = tmp_path / "alpha.py", tmp_path / "beta.py"
 
@@ -74,7 +74,7 @@ def test_relay_applies_observer_thread_events_on_the_store_thread(tmp_path, capl
 def test_drain_waits_for_the_first_event_then_returns(tmp_path):
     embedder = FakeEmbedder(dim=64)
     with Store.open(tmp_path / "index.db", embedder.dim, "fake") as store:
-        handler = CodeChangeHandler(store, embedder)
+        handler = CodeChangeHandler(store, embedder, [tmp_path])
         relay = EventRelay()
         assert relay.drain(handler) == 0  # nothing queued: returns at once
         start = time.monotonic()
@@ -85,7 +85,7 @@ def test_drain_waits_for_the_first_event_then_returns(tmp_path):
 def test_remove_failure_is_logged_not_raised(tmp_path, caplog):
     embedder = FakeEmbedder(dim=64)
     store = Store.open(tmp_path / "index.db", embedder.dim, "fake")
-    handler = CodeChangeHandler(store, embedder)
+    handler = CodeChangeHandler(store, embedder, [tmp_path])
     store.close()  # any store error on delete — it must not kill the watcher
     with caplog.at_level(logging.WARNING, logger="qmx.watch"):
         handler.on_deleted(FileDeletedEvent(str(tmp_path / "gone.py")))
