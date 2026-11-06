@@ -199,6 +199,24 @@ class Strict:
             self.secs += time.perf_counter() - t
 
 
+class Timed:
+    """Reranker wrapper that records each rerank call's wall time (ms) for latency A/Bs."""
+
+    def __init__(self, inner):
+        self.inner, self.ms = inner, []
+
+    @property
+    def _open_until(self):  # the circuit-breaker state the failure check reads
+        return getattr(self.inner, "_open_until", 0)
+
+    def rerank(self, query, hits):
+        t = time.perf_counter()
+        try:
+            return self.inner.rerank(query, hits)
+        finally:
+            self.ms.append(1000 * (time.perf_counter() - t))
+
+
 def rank_of(target: int, hits) -> int | None:
     for i, h in enumerate(hits, 1):
         if (h.hit.chunk_id if hasattr(h, "hit") else h.chunk_id) == target:
@@ -213,6 +231,7 @@ def cmd_retrieve(args) -> None:
         name = Path(cfg).stem
         emb = Strict(make_embedder(s))
         rr = make_reranker(s)
+        rr = Timed(rr) if rr is not None else None
         rr_fail = 0
         out = []
         vec_secs = 0.0
@@ -231,12 +250,18 @@ def cmd_retrieve(args) -> None:
                     row.update(vec=rank_of(q["target"], vhits), rrf=rank_of(q["target"], rrf),
                                full=rank_of(q["target"], full))
                 row["full_top5"] = [h.hit.chunk_id for h in full]
+                if rr is not None and rr.ms:
+                    row["rerank_ms"] = round(rr.ms[-1], 1)
                 out.append(row)
         jdump(D / f"ret_{name}.jsonl", out)
         n = len(known) + len(real)
+        lat = ""
+        if rr is not None and rr.ms:
+            p50, p90 = np.percentile(rr.ms, [50, 90])
+            lat = f", rerank median {p50:.0f} ms / p90 {p90:.0f} ms ({len(rr.ms)} calls)"
         print(f"{name}: {n} queries; embed failures {emb.failures}, rerank failures {rr_fail}; "
               f"mean query-embed {1000*emb.secs/max(1, 3*n):.0f} ms, "
-              f"mean vector search {1000*vec_secs/max(1, n):.0f} ms")
+              f"mean vector search {1000*vec_secs/max(1, n):.0f} ms{lat}")
         if emb.failures or rr_fail:
             sys.exit(f"{name}: backend failures -> results not trustworthy, rerun")
 
@@ -406,6 +431,13 @@ def cmd_report(args) -> None:  # noqa: C901 (one linear report)
                 lo, hi = boot_ci(d)
                 flag = "BETTER" if lo > 0 else ("WORSE" if hi < 0 else "n.s.")
                 print(f"- {n} {arm} {label}: {d.mean():+.3f} [{lo:+.3f}, {hi:+.3f}] {flag}")
+    lats = {n: [r["rerank_ms"] for r in ret[n].values() if "rerank_ms" in r] for n in names}
+    if any(lats.values()):
+        print("\nRerank latency per query (RRF top-40 reranked, ms):\n")
+        for n in names:
+            if lats[n]:
+                p50, p90 = np.percentile(lats[n], [50, 90])
+                print(f"- {n}: median {p50:.0f}, p90 {p90:.0f} ({len(lats[n])} queries)")
     print("\nFull-pipeline MRR@5 by kind / style:\n")
     groups: dict[str, list[str]] = {}
     for q in qids:
