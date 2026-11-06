@@ -47,6 +47,8 @@ _ENV_MAP = {
     "QMX_JUDGE_FILING_RULES": "judge_filing_rules",
     "QMX_JUDGE_OFFRULE_BLOCK": "judge_offrule_block",
     "QMX_DEDUP_MIN_SIMILARITY": "dedup_min_similarity",
+    "QMX_INJECT_GLOBAL_SHARE": "inject_global_share",
+    "QMX_INJECT_RELEVANCE": "inject_relevance",
     "QMX_CONSOLIDATE_MIN_TURNS": "consolidate_min_turns",
     "QMX_CONSOLIDATE_MIN_CHARS": "consolidate_min_chars",
     "QMX_MCP_HOST": "mcp_host",
@@ -168,6 +170,12 @@ class Settings:
     # Insert-time near-duplicate check: a `new` lesson whose nearest live lesson is at least this
     # similar gets one "same lesson?" question (drop / merge / keep). 0 disables it.
     dedup_min_similarity: float = 0.65
+    # SessionStart injection: the repo's own lessons come first; global lessons get this share of
+    # the budget (plus whatever the repo's lessons leave), ranked by similarity to the repo's
+    # CLAUDE.md/README head. 0 = repo lessons only (globals only fill unused space).
+    # inject_relevance = false ranks global lessons by importance×recency instead (no embed call).
+    inject_global_share: float = 0.4
+    inject_relevance: bool = True
 
     # Reranker: base URL of a Cohere-style /v1/rerank server (vLLM serving
     # llama-nemotron-rerank-1b-v2 in prod; llama.cpp llama-server --reranking also works).
@@ -271,10 +279,10 @@ def _coerce_value(name: str, raw: object) -> object:
         return int(raw)
     if name in {
         "request_timeout", "retry_base_delay", "chat_timeout", "dedup_min_similarity",
-        "chat_temperature", "chat_top_p", "parked_similar_max_distance",
+        "chat_temperature", "chat_top_p", "parked_similar_max_distance", "inject_global_share",
     }:
         return float(raw)
-    if name in {"judge_reasoning_field", "judge_offrule_block"}:
+    if name in {"judge_reasoning_field", "judge_offrule_block", "inject_relevance"}:
         return _coerce_bool(name, raw)
     if name == "chat_template_kwargs":
         return template_kwargs_json(raw)

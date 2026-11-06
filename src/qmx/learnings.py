@@ -12,8 +12,10 @@ This module orchestrates the store + embed layers into the learning lifecycle:
   free with ``include_retired=True``.
 - :func:`lessons` — the **pull** path: semantic search over ``kind='learning'`` re-ranked by
   ``relevance × importance × recency`` (not relevance alone), returning lessons with citations.
-- :func:`inject_lessons` — the **push** path: query-free, ``scope``-keyed selection ranked by
-  ``importance × recency`` (no query exists yet at ``SessionStart``; see ``plan/qmx-learnings.md``).
+- :func:`inject_lessons` — the **push** path at ``SessionStart``: the repo's own lessons first
+  (``importance × recency``), then global lessons ranked by similarity to a profile of the repo
+  (its ``CLAUDE.md``/``README.md`` head), falling back to ``importance × recency`` when no profile
+  embedding is available.
 
 Extraction and consolidation (the Qwen passes) live in :mod:`qmx.consolidate`; promotion to
 curated memory in :mod:`qmx.promote`.
@@ -323,28 +325,75 @@ def lessons(
     return [learning_to_dict(learning, score=score) for score, learning in top]
 
 
-def inject_lessons(store: Store, scope: str | None, *, char_budget: int = 10_000) -> list[Learning]:
-    """Push path: query-free, ``scope``-keyed lessons (+ global) by importance×recency, budgeted.
+INJECT_GLOBAL_SHARE = 0.4  # share of the injection budget reserved for global lessons
+_INJECT_RELEVANCE_POOL = 200  # nearest lessons considered when ranking global ones by relevance
 
-    Returns as many live lessons as fit in ``char_budget`` (the SessionStart ``additionalContext``
-    cap). No embedding — injection has no query, so relevance is *project identity*, not meaning.
+
+def inject_lessons(
+    store: Store,
+    scope: str | None,
+    *,
+    char_budget: int = 10_000,
+    query_vec: list[float] | None = None,
+    global_share: float = INJECT_GLOBAL_SHARE,
+) -> list[Learning]:
+    """Push path: the repo's own lessons first, then the global lessons most related to the repo.
+
+    - **Repo lessons** (``scope`` matches) come first, by importance×recency: project identity is
+      their relevance. They may use the whole budget except ``global_share`` of it.
+    - **Global lessons** (``scope IS NULL``) fill the rest — the reserved share, plus whatever the
+      repo lessons left unused. With ``query_vec`` (an embedding of what the repo is about; see
+      :func:`qmx.session.repo_profile`) they are ranked by similarity to it, so a tax repo is not
+      handed GPU-commitment lessons just because those are rated important. Without it they fall
+      back to importance×recency.
+
+    Other repos' lessons are never injected, and promoted lessons are skipped (they already live in
+    curated memory). A lesson too long for the space left is skipped, not a stop. Returns the
+    chosen lessons, repo ones first.
     """
-    # Exclude promoted lessons: they live in curated memory now, so injecting them double-surfaces.
-    candidates = store.list_learnings(
-        scope=scope, include_global=True, live_only=True, exclude_promoted=True
-    )
-    candidates.sort(key=lambda le: (le.importance, le.updated_at), reverse=True)
-    chosen: list[Learning] = []
-    used = 0
-    for learning in candidates:
-        rendered = render_lesson(learning)
-        if chosen and used + len(rendered) > char_budget:
-            break
-        chosen.append(learning)
-        used += len(rendered) + 1
+    live = store.list_learnings(live_only=True, exclude_promoted=True)  # importance, recency order
+    own = [le for le in live if scope is not None and le.scope == scope]
+    global_ = [le for le in live if le.scope is None]
+    if query_vec is not None and global_:
+        global_ = _rank_by_relevance(store, query_vec, global_)
+
+    reserve = int(char_budget * max(0.0, min(1.0, global_share))) if global_ else 0
+    chosen, used = _fill(own, char_budget - reserve, [], 0)
+    chosen, used = _fill(global_, char_budget, chosen, used)
     for learning in chosen:
         store.touch_learning(learning.learning_id)
     return chosen
+
+
+def _rank_by_relevance(
+    store: Store, query_vec: list[float], candidates: list[Learning]
+) -> list[Learning]:
+    """``candidates`` reordered by cosine similarity to ``query_vec``; unmatched ones keep their
+    order at the end (the vector pool is capped, and a lesson may lack a vector)."""
+    by_id = {le.learning_id: le for le in candidates}
+    ranked: list[Learning] = []
+    seen: set[int] = set()
+    for hit in store.search_vec(query_vec, k=_INJECT_RELEVANCE_POOL, kind="learning"):
+        learning = store.learning_by_doc_id(hit.doc_id)
+        if learning is None or learning.learning_id not in by_id or learning.learning_id in seen:
+            continue
+        seen.add(learning.learning_id)
+        ranked.append(by_id[learning.learning_id])
+    return ranked + [le for le in candidates if le.learning_id not in seen]
+
+
+def _fill(
+    candidates: list[Learning], limit: int, chosen: list[Learning], used: int
+) -> tuple[list[Learning], int]:
+    """Append candidates in order while their rendering fits under ``limit`` characters."""
+    chosen = list(chosen)
+    for learning in candidates:
+        size = len(render_lesson(learning)) + 1
+        if used + size > limit:
+            continue
+        chosen.append(learning)
+        used += size
+    return chosen, used
 
 
 def render_lesson(learning: Learning) -> str:
