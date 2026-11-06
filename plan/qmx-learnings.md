@@ -211,6 +211,16 @@ So a session in `xtorch` is injected with xtorch lessons + a few globals and **n
 `cpe-intelligence`** — cross-project noise is excluded structurally. An unknown / non-git `cwd` →
 globals only (or nothing).
 
+> **Update 2026-11-06 — global lessons are ranked by a repo profile.** With ~90% of lessons global
+> and most rated importance ≥ 0.8, importance × recency handed every repo the same globals. There
+> is still no query at `SessionStart`, but the repo describes itself: the hook now embeds the repo
+> key plus the head of its `CLAUDE.md` (else `AGENTS.md`, else `README.md`) and ranks global
+> lessons by similarity to that. Repo lessons still come first (importance × recency); globals get
+> `inject_global_share` of the budget (default 0.4) plus whatever the repo's lessons leave. The
+> embed uses the fail-fast read embedder; if it fails, or `inject_relevance = false`, globals fall
+> back to importance × recency. A non-git `cwd` now really gets globals only — the old query
+> applied no scope filter there and injected every repo's lessons.
+
 **Where `scope` comes from.** Each learning is stamped with `scope` at extraction — near-deterministic
 because a Claude Code transcript already lives under `~/.claude/projects/<encoded-cwd>/`, so the
 extractor derives the session's repo (same `git remote` normalization) and sets `scope` to it. The

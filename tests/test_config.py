@@ -63,3 +63,16 @@ def test_as_dict_is_json_safe():
     s = Settings.load(config_path=Path("/does/not/exist"), env={})
     d = s.as_dict()
     assert isinstance(d["db_path"], str)
+
+
+def test_injection_settings_coerce_from_toml_and_env(tmp_path):
+    s = Settings.load(config_path=Path("/does/not/exist"), env={})
+    assert (s.inject_global_share, s.inject_relevance) == (0.4, True)
+    cfg = tmp_path / "config.toml"
+    cfg.write_text("inject_global_share = 0.25\ninject_relevance = false\n")
+    s = Settings.load(config_path=cfg, env={})
+    assert s.inject_global_share == 0.25 and s.inject_relevance is False
+    env = {"QMX_INJECT_GLOBAL_SHARE": "0", "QMX_INJECT_RELEVANCE": "no"}
+    s = Settings.load(config_path=Path("/does/not/exist"), env=env)
+    assert s.inject_global_share == 0.0 and isinstance(s.inject_global_share, float)
+    assert s.inject_relevance is False

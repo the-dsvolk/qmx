@@ -372,7 +372,10 @@ relevant lessons on start (alongside the `Stop` capture hook). In `~/.claude/set
 ```
 
 `session-end` spawns `qmx consolidate` **detached** (never blocks the session closing); `session-start`
-injects the current repo's lessons (+ global), budgeted to 10k chars. For a **nightly catch-all**
+injects the current repo's lessons first, then the global lessons most similar to the repo's
+`CLAUDE.md`/`AGENTS.md`/`README.md` head (`inject_global_share`, default 40% of the budget, is kept
+for them), budgeted to 10k chars. With the embedder unreachable, or `inject_relevance = false`, global
+lessons fall back to importance × recency. For a **nightly catch-all**
 sweep (`qmx consolidate --all` via a launchd agent) and where these run, see the *Mac — learnings
 triggers* section of [`INFRA.md`](./INFRA.md).
 

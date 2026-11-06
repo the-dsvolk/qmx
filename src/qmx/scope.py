@@ -47,6 +47,12 @@ def canonical_repo_key(cwd: Path | str) -> str | None:
     return Path(top).name if top else None
 
 
+def repo_root(cwd: Path | str) -> Path | None:
+    """Top-level directory of the git checkout (or worktree) holding ``cwd``, else ``None``."""
+    top = _git(str(cwd), "rev-parse", "--show-toplevel")
+    return Path(top) if top else None
+
+
 def _git(cwd: str, *args: str) -> str | None:
     try:
         out = subprocess.run(
