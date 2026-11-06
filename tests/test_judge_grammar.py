@@ -115,3 +115,21 @@ def test_keys_and_enum_literals_are_escaped_for_ebnf():
 def test_outside_the_subset_raises(schema):
     with pytest.raises(UnsupportedSchema):
         json_grammar(schema)
+
+
+def test_max_items_bounds_the_array():
+    """The v2 merge check caps its logged lists at 3 (PRESERVE_SCHEMA_V2); the fixed layout must
+    enforce the same bound as vLLM's own structured output does."""
+    from qmx.consolidate import PRESERVE_SCHEMA_V2
+
+    schema = {"type": "object", "properties": {"reasoning": {"type": "string"},
+              "xs": {"type": "array", "items": {"type": "string"}, "maxItems": 2}},
+              "required": ["reasoning", "xs"]}
+    rx = re.compile(json_layout_regex(schema))
+    for n in (0, 1, 2):
+        assert rx.fullmatch(json.dumps({"reasoning": "r", "xs": ["a"] * n}, indent=2)), n
+    assert not rx.fullmatch(json.dumps({"reasoning": "r", "xs": ["a"] * 3}, indent=2))
+    json_grammar(PRESERVE_SCHEMA_V2)  # supported, so the opt-in layout still works for v2
+    with pytest.raises(UnsupportedSchema):
+        json_grammar({**schema, "properties": {**schema["properties"],
+                      "xs": {"type": "array", "items": {"type": "string"}, "maxItems": -1}}})

@@ -77,6 +77,26 @@ def test_unusable_dedup_check_keeps_the_candidate(store, tmp_path):
     assert (res.created, res.dedup_dropped, res.unusable_replies) == (1, 0, 1)
 
 
+@pytest.mark.parametrize("rules", ["current", "v2"])
+def test_unusable_merge_check_on_the_near_duplicate_path_keeps_the_candidate(store, tmp_path,
+                                                                            rules):
+    """Eval 2026-11-05: a merge check cut off on a long lesson used to *drop* the candidate the
+    near-duplicate check had just said adds a fact. A broken check never loses a lesson."""
+    from qmx.consolidate import build_judge
+
+    s, embedder = store
+    lid = _existing(s, embedder, "same words exactly")
+    merged = {"same_lesson": True, "adds_new_fact": True,
+              "merged_statement": "same words exactly, plus one fact", "merged_detail": "fact"}
+    chat = FakeChat(extractions=[[{"type": "howto", "statement": "same words exactly",
+                                   "detail": "plus one fact"}]],
+                    dup_checks=[merged], unusable={"merge": 1})
+    res = consolidate_session(s, embedder, chat, _doc(s, embedder, tmp_path), scope=SCOPE,
+                              judge=build_judge(rules))
+    assert (res.created, res.dedup_dropped, res.dedup_merged, res.unusable_replies) == (1, 0, 0, 1)
+    assert s.get_learning(lid).statement == "same words exactly"  # target untouched
+
+
 def test_unusable_retirement_check_keeps_the_lesson_live(store, tmp_path):
     s, embedder = store
     lid = _existing(s, embedder)

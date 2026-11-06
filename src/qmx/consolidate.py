@@ -333,27 +333,31 @@ DEDUP_RULES_V2 = (
 )
 
 PRESERVE_RULES_V2 = (
-    "You audit one edit to a knowledge base of engineering lessons. OLD is an existing lesson and "
-    "OLD MAIN RULE is its first sentence. NEW is the text proposed to REPLACE OLD; CANDIDATE is "
-    "the newly learned lesson that motivated the edit. (1) Copy, verbatim, the shortest span of "
-    "NEW that states OLD MAIN RULE; leave it empty if NEW does not state it. (2) List each fact of "
-    "OLD (a number, command, path, name, condition or caveat) that NEW no longer states; ignore "
-    "commentary about other lessons or ids. (3) List each sentence or clause of NEW that states a "
-    "different rule than OLD MAIN RULE, even if it is about the same tool, data or topic. (4) List "
-    "each fact in NEW that appears in neither OLD nor CANDIDATE. NEW preserves OLD only if it "
-    "still states OLD MAIN RULE and is still a lesson about that rule.{THINK}"
+    "You audit one edit to a knowledge base of engineering lessons. OLD is an existing lesson "
+    "and OLD MAIN RULE is its first sentence. NEW is the text proposed to REPLACE OLD; "
+    "CANDIDATE is the newly learned lesson that motivated the edit. (1) Copy, verbatim, the "
+    "shortest span of NEW that states OLD MAIN RULE; leave it empty if NEW does not state it. "
+    "(2) List up to three facts of OLD (a number, command, path, name, condition or caveat) "
+    "that NEW no longer states; ignore commentary about other lessons or ids. (3) List up to "
+    "three sentences or clauses of NEW that state a different rule than OLD MAIN RULE, even "
+    "if they are about the same tool, data or topic. (4) List up to three facts in NEW that "
+    "appear in neither OLD nor CANDIDATE. NEW preserves OLD only if it still states OLD MAIN "
+    "RULE and is still a lesson about that rule.{THINK}"
 )
 
 # `old_core_claim` is gone on purpose: code supplies OLD MAIN RULE, so the judge can no longer pick
 # a minor sentence as the "core claim" a clobber happened to keep (FINDINGS 1.4, X-4057-med #2005).
+# The three lists are capped at 3 items (enforced by the structured-output grammar): they are only
+# logged (off-rule blocks only with judge_offrule_block, where one item is enough), and on long
+# lessons enumerating every fact ran merge checks into the token cap (eval 2026-11-05).
 PRESERVE_SCHEMA_V2 = {
     "type": "object",
     "properties": {
         "reasoning": {"type": "string"},
         "evidence_in_new": {"type": "string"},
-        "lost_facts": {"type": "array", "items": {"type": "string"}},
-        "off_rule_additions": {"type": "array", "items": {"type": "string"}},
-        "unsupported_additions": {"type": "array", "items": {"type": "string"}},
+        "lost_facts": {"type": "array", "items": {"type": "string"}, "maxItems": 3},
+        "off_rule_additions": {"type": "array", "items": {"type": "string"}, "maxItems": 3},
+        "unsupported_additions": {"type": "array", "items": {"type": "string"}, "maxItems": 3},
         "preserves": {"type": "boolean"},
         "lost": {"type": "string"},
     },
@@ -1131,7 +1135,8 @@ def _dedup_into(
     Not the same lesson (or an unusable reply) -> False, and the candidate is stored as new, so a
     broken check never loses a lesson. Same lesson adding nothing -> dropped. Same lesson adding a
     fact -> merged into ``existing`` through the verbatim-quote merge check; if that merge would
-    lose the existing claim, the candidate is dropped and ``existing`` stays intact.
+    lose the existing claim, the candidate is dropped and ``existing`` stays intact. An unusable
+    merge-check reply (cut off at the cap) -> False as well: stored as new, never dropped.
 
     Filing rules v2: the judge is shown EXISTING MAIN RULE; a merge refused by the headline backstop
     is dropped like any lost claim, but one refused as off-rule (it appends a different rule) means
@@ -1161,6 +1166,13 @@ def _dedup_into(
         return True
     keeps, kind, why = _merge_check(chat, existing, stmt, detail, candidate, result, judge=j)
     if not keeps:
+        if kind == "unusable":
+            # A broken check never loses a lesson: the judge said the candidate adds a fact, and
+            # a cut-off/garbled merge check says nothing about the merge. Before 2026-11-05 this
+            # fell through to "dropped" (the eval lost 3 candidates per judge on long lessons).
+            log.info("kept candidate %r as new: the merge check into #%s was unusable",
+                     candidate["statement"][:80], existing.learning_id)
+            return False
         if kind == "off_rule":
             log.info("kept candidate %r as new: its merge into #%s was refused (%s)",
                      candidate["statement"][:80], existing.learning_id, why)
