@@ -87,6 +87,26 @@ def reindex(
     return store.reindex_document(doc_id, chunks, new_embeddings)
 
 
+def _pruned_dir(name: str) -> bool:
+    """A directory the walk never descends into: junk/build output or a dot-folder."""
+    return name in EXCLUDE_DIRS or name.startswith(".")
+
+
+def is_excluded(path: Path, root: Path) -> bool:
+    """Whether :func:`iter_source_files` walking ``root`` would never reach ``path``.
+
+    True when a folder between ``root`` and ``path`` is pruned (``EXCLUDE_DIRS`` or a dot-folder).
+    Judged relative to ``root``, so a root that itself sits in such a folder still counts.
+    ``path`` must be under ``root``.
+    """
+    return any(_pruned_dir(part) for part in path.relative_to(root).parts[:-1])
+
+
+def repo_label(root: Path) -> str:
+    """The ``repo`` label for files indexed from ``root``: its name (a file root: its folder's)."""
+    return root.name if root.is_dir() else root.parent.name
+
+
 def iter_source_files(root: Path) -> Iterator[Path]:
     """Yield indexable files (code + markdown) under ``root``, pruning junk dirs."""
     if root.is_file():
@@ -94,7 +114,7 @@ def iter_source_files(root: Path) -> Iterator[Path]:
             yield root
         return
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in EXCLUDE_DIRS and not d.startswith(".")]
+        dirnames[:] = [d for d in dirnames if not _pruned_dir(d)]
         for name in filenames:
             path = Path(dirpath) / name
             if repo_kind(path) is not None:
@@ -102,19 +122,28 @@ def iter_source_files(root: Path) -> Iterator[Path]:
 
 
 def index_paths(
-    paths: list[Path], store: Store, embedder: Embedder, *, force: bool = False
+    paths: list[Path],
+    store: Store,
+    embedder: Embedder,
+    *,
+    force: bool = False,
+    repo: str | None = None,
 ) -> IndexStats:
-    """Index code files under ``paths``; prune deleted files under directory roots."""
+    """Index code files under ``paths``; prune deleted files under directory roots.
+
+    ``repo`` overrides the recorded repo label (default :func:`repo_label` of each path) — the
+    watcher passes its watched root's label when it reindexes a single file.
+    """
     stats = IndexStats()
     for raw_root in paths:
         root = raw_root.resolve()
-        repo = root.name if root.is_dir() else root.parent.name
+        label = repo if repo is not None else repo_label(root)
         seen: set[str] = set()
         for file_path in iter_source_files(root):
             stats.files_scanned += 1
             seen.add(str(file_path))
             try:
-                _index_file(file_path, repo, store, embedder, force, stats)
+                _index_file(file_path, label, store, embedder, force, stats)
             except OSError as exc:
                 stats.errors.append(f"{file_path}: {exc}")
                 log.warning("skip %s: %s", file_path, exc)

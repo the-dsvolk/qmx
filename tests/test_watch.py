@@ -22,7 +22,7 @@ FUNC2 = "def f(x):\n    return x + 2\n"
 def env(tmp_path):
     embedder = FakeEmbedder(dim=64)
     store = Store.open(tmp_path / "index.db", embedder.dim, "fake")
-    handler = CodeChangeHandler(store, embedder)
+    handler = CodeChangeHandler(store, embedder, [tmp_path])
     yield tmp_path, store, handler
     store.close()
 
