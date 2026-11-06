@@ -16,7 +16,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from qmx.embed import EmbedBackendError, Embedder
+from qmx.embed import EmbedBackendError, Embedder, embed_queries
 from qmx.store import SearchHit, Store
 
 if TYPE_CHECKING:
@@ -68,7 +68,7 @@ def search(
     """
     pool = pool or max(4 * k, 20)
     try:
-        [query_vec] = embedder.embed([query])
+        [query_vec] = embed_queries(embedder, [query])
     except EmbedBackendError as exc:
         log.warning("embedding backend unavailable, degrading to BM25-only: %s", exc)
         query_vec = None

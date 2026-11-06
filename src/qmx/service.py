@@ -21,7 +21,7 @@ from qmx.embed import (
     CircuitBreakerEmbedder,
     EmbedBackendError,
     Embedder,
-    ping_ollama,
+    ping_embedder,
     read_embedder,
 )
 from qmx.learnings import (
@@ -56,8 +56,6 @@ MAX_TEXT_CHARS = 4000  # cap chunk text returned to an agent so results stay com
 # results (and, if it matters, re-run the query once `status.ollama_ok` is true again).
 DEGRADED_NOTE = "bm25-only: embedding backend unreachable, results are keyword-matched"
 
-# Cosine distance under which another open parked item counts as "similar" (a dedup hint on park).
-PARKED_SIMILAR_MAX_DISTANCE = 0.3
 PARKED_LIST_STATUSES = ("open", "done", "dropped", "closed", "all")
 
 _MEETING_FOLDER_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}_")
@@ -257,7 +255,8 @@ class QmxService:
         out: list[dict] = []
         for hit in store.search_vec(vec, k=limit + 1, kind=PARKED_KIND):
             other_id = item_id_from_path(hit.path)
-            if other_id in (None, item.id) or hit.distance > PARKED_SIMILAR_MAX_DISTANCE:
+            too_far = hit.distance > self._settings.parked_similar_max_distance
+            if other_id in (None, item.id) or too_far:
                 continue
             try:
                 other = repo.get(other_id)
@@ -358,16 +357,25 @@ class QmxService:
     def status(self) -> dict:
         """Index stats + backend health, for ops and the MCP ``status`` tool.
 
-        ``ollama_ok`` is a live ping; ``degraded`` is whether search is currently answering
+        ``embed_ok`` is a live ping of the configured embedding backend (``ollama_ok`` is the same
+        value under its historical name); ``degraded`` is whether search is currently answering
         BM25-only because the embedding backend failed within the circuit-breaker cooldown.
         """
         with self._store() as store:
             index = store.index_stats()
+        ok = ping_embedder(self._settings)
         return {
             "index": index,
             "embed_model": self._settings.embed_model,
+            "embed_backend": self._settings.embed_backend,
+            "embed_url": (
+                self._settings.embed_url
+                if self._settings.embed_backend == "openai"
+                else self._settings.ollama_url
+            ),
+            "embed_ok": ok,
             "ollama_url": self._settings.ollama_url,
-            "ollama_ok": ping_ollama(self._settings),
+            "ollama_ok": ok,
             "degraded": self._embedder.degraded,
         }
 

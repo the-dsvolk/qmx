@@ -200,7 +200,7 @@ def test_unreachable_rerank_server_is_asked_once_then_skipped():
 
 
 def test_service_status_reports_degraded(settings, monkeypatch):
-    monkeypatch.setattr("qmx.service.ping_ollama", lambda *a, **kw: False)
+    monkeypatch.setattr("qmx.service.ping_embedder", lambda *a, **kw: False)
     service = QmxService(settings, DownEmbedder())
     assert service.status()["degraded"] is False  # nothing has failed yet
     service.query("backoff", k=5)
