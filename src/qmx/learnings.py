@@ -28,6 +28,7 @@ from datetime import UTC, datetime
 from qmx.embed import Embedder
 from qmx.index import reindex
 from qmx.rerank import Reranker
+from qmx.scope import normalize_scope
 from qmx.search import search
 from qmx.store import KEEP, Chunk, Keep, Learning, Store
 
@@ -64,14 +65,21 @@ def add_learning(
     detail: str | None = None,
     importance: float = 0.5,
     source_anchors: list[dict] | str | None = None,
+    strict_scope: bool = False,
 ) -> int:
     """Insert a lesson and embed it as a ``kind='learning'`` document. Returns the ``learning_id``.
 
     ``source_anchors`` may be a list (JSON-encoded here) or a pre-encoded string; it records the
     session/turn citations so a fired lesson is traceable back to where it was learned.
+
+    ``scope`` is normalized against the keys already in use (:func:`~qmx.scope.normalize_scope`):
+    ``"global"`` → global, ``"qmx"`` → ``"the-dsvolk/qmx"``. ``strict_scope`` (the MCP tool and
+    CLI, where someone typed it) raises :class:`~qmx.scope.UnknownScopeError` for a bare name that
+    matches no repo; automated callers keep it as given.
     """
     if type not in LEARNING_TYPES:
         raise ValueError(f"learning type must be one of {LEARNING_TYPES}, got {type!r}")
+    scope = normalize_scope(scope, store.learning_scopes(), strict=strict_scope)
     anchors = (
         source_anchors
         if source_anchors is None or isinstance(source_anchors, str)
@@ -109,11 +117,13 @@ def update_learning(
     statement: str = KEEP,
     detail: str | None = KEEP,
     importance: float = KEEP,
+    strict_scope: bool = False,
 ) -> Learning | None:
     """Fix a lesson in place; returns the updated row (``None`` if ``learning_id`` is unknown).
 
     Every field defaults to :data:`~qmx.store.KEEP` (leave alone) and ``None`` clears a nullable one
-    (``topic``/``scope``/``detail``), so ``scope=None`` re-scopes a lesson to global.
+    (``topic``/``scope``/``detail``), so ``scope=None`` re-scopes a lesson to global — as does
+    ``scope="global"``, since a new scope is normalized like :func:`add_learning`'s.
 
     Two costs are avoided deliberately:
 
@@ -132,6 +142,8 @@ def update_learning(
         raise ValueError("statement cannot be empty")
     if not isinstance(importance, Keep):
         importance = _clamp01(importance)
+    if not isinstance(scope, Keep):
+        scope = normalize_scope(scope, store.learning_scopes(), strict=strict_scope)
 
     store.update_learning(
         learning_id,

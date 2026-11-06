@@ -85,7 +85,9 @@ def build_server(settings: Settings, service: QmxService | None = None) -> FastM
         """Record a durable lesson so future sessions recall it. ``type``: decision|mistake|howto.
 
         ``statement`` is the lesson in one crisp sentence; ``detail`` the why/correction/better-way;
-        ``scope`` the repo key it applies to (omit for a global lesson).
+        ``scope`` the repo it applies to as its git remote ``owner/repo`` (e.g. ``the-dsvolk/qmx``)
+        — omit it for a global lesson. A bare repo name is mapped to the one known ``owner/repo``
+        it matches, and rejected with the options if it matches none or several.
         """
         return svc.add_learning(
             type=type,
