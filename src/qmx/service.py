@@ -152,6 +152,7 @@ class QmxService:
                 scope=scope,
                 detail=detail,
                 importance=importance,
+                strict_scope=True,  # typed by an agent: an unknown bare repo name is an error
             )
             learning = store.get_learning(learning_id)
         return learning_to_dict(learning)
@@ -179,6 +180,7 @@ class QmxService:
                 statement=statement,
                 detail=detail,
                 importance=importance,
+                strict_scope=True,
             )
         return _learning_or_none(learning)
 

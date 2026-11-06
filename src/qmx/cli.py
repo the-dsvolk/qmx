@@ -413,6 +413,7 @@ def _cmd_add_learning(settings: Settings, args: argparse.Namespace) -> int:
                 scope=args.scope,
                 detail=args.detail,
                 importance=args.importance,
+                strict_scope=True,
             )
     except (StoreSchemaMismatch, EmbedBackendError, ValueError) as exc:
         print(f"add-learning failed: {exc}", file=sys.stderr)
@@ -439,7 +440,7 @@ def _cmd_update_learning(settings: Settings, args: argparse.Namespace) -> int:
         return 2
     try:
         with _open_store(settings) as store, make_embedder(settings) as embedder:
-            learning = update_learning(store, embedder, args.id, **patch)
+            learning = update_learning(store, embedder, args.id, **patch, strict_scope=True)
     except (StoreSchemaMismatch, EmbedBackendError, ValueError) as exc:
         print(f"update-learning failed: {exc}", file=sys.stderr)
         return 1
@@ -944,7 +945,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_add.add_argument("--detail", default=None, help="why / the correction / the better way")
     p_add.add_argument("--topic", default=None, help="short slug for filtering/injection")
-    p_add.add_argument("--scope", default=None, help="repo key it applies to (omit = global)")
+    p_add.add_argument(
+        "--scope", default=None, help="the repo's git remote owner/repo (omit = global)"
+    )
     p_add.add_argument("--importance", type=float, default=0.5, help="0..1 (default 0.5)")
 
     p_upd = sub.add_parser("update-learning", help="fix an existing lesson in place")

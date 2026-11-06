@@ -842,6 +842,13 @@ class Store:
         row = self._conn.execute("SELECT * FROM learnings WHERE doc_id=?", (doc_id,)).fetchone()
         return None if row is None else _row_to_learning(row)
 
+    def learning_scopes(self) -> list[str]:
+        """Every non-global scope key any lesson carries (live or retired), sorted."""
+        rows = self._conn.execute(
+            "SELECT DISTINCT scope FROM learnings WHERE scope IS NOT NULL ORDER BY scope"
+        ).fetchall()
+        return [r[0] for r in rows]
+
     def list_learnings(
         self,
         *,
