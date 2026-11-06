@@ -29,6 +29,7 @@ _ENV_MAP = {
     "QMX_EMBED_MAX_TOKENS": "embed_max_tokens",
     "QMX_RERANK_URL": "rerank_url",
     "QMX_RERANK_MODEL": "rerank_model",
+    "QMX_RERANK_MAX_TOKENS": "rerank_max_tokens",
     "QMX_CHAT_MODEL": "chat_model",
     "QMX_CHAT_NUM_CTX": "chat_num_ctx",
     "QMX_CHAT_TIMEOUT": "chat_timeout",
@@ -168,9 +169,14 @@ class Settings:
     # similar gets one "same lesson?" question (drop / merge / keep). 0 disables it.
     dedup_min_similarity: float = 0.65
 
-    # Reranker: base URL of a Cohere-style /v1/rerank server (llama.cpp llama-server --reranking).
-    # Empty = disabled (RRF-only). e.g. "http://spark-0e81.local:8081".
+    # Reranker: base URL of a Cohere-style /v1/rerank server (vLLM serving
+    # llama-nemotron-rerank-1b-v2 in prod; llama.cpp llama-server --reranking also works).
+    # Empty = disabled (RRF-only). e.g. "http://spark-0e81.local:8003".
     rerank_url: str = ""
+    # vLLM ``truncate_prompt_tokens`` for each query+passage pair, so an over-long pair is cut to
+    # this many tokens server-side instead of failing the whole request (which would silently
+    # keep RRF order). llama.cpp ignores the field. 0 = not sent.
+    rerank_max_tokens: int = 0
 
     # Resident MCP server bind address (the Spark serves this on the LAN; clients use QMX_MCP_URL).
     mcp_host: str = "127.0.0.1"
@@ -260,7 +266,7 @@ def _coerce_value(name: str, raw: object) -> object:
     if name in {
         "embed_dim", "embed_batch_size", "max_retries", "mcp_port", "parked_stale_days",
         "chat_num_ctx", "consolidate_min_turns", "consolidate_min_chars", "chat_max_tokens",
-        "chat_short_max_tokens", "embed_max_tokens",
+        "chat_short_max_tokens", "embed_max_tokens", "rerank_max_tokens",
     }:
         return int(raw)
     if name in {

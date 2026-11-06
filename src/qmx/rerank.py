@@ -1,9 +1,12 @@
 """Reranking — reorder the fused top-k with a cross-encoder.
 
 Default is RRF-only (``NoOpReranker``). When ``rerank_url`` is set, :class:`HttpReranker`
-calls a Cohere-style ``/v1/rerank`` endpoint — in our deployment that's **llama.cpp `llama-server
---reranking` serving Qwen3-Reranker on the Spark GPU** (see ``plan/qmx-ml-notes.md`` TD-1). It's a
+calls a Cohere-style ``/v1/rerank`` endpoint — in our deployment that's **vLLM serving
+llama-nemotron-rerank-1b-v2 on the Spark GPU** (see ``plan/qmx-rerank-nemotron.md``; llama.cpp
+``llama-server --reranking`` with Qwen3-Reranker, the previous setup, speaks the same API). It's a
 thin HTTP client and **fails soft**: if the rerank server is unreachable, the RRF order is kept.
+``max_tokens`` > 0 sends vLLM's ``truncate_prompt_tokens`` so one over-long query+passage pair is
+trimmed instead of failing the whole request.
 
 Failing soft is not enough when the Spark is off — waiting out a 30s read timeout on every query
 is its own outage. So the connect phase gets a short budget (a host that is not there says so
@@ -53,9 +56,10 @@ class NoOpReranker:
 class HttpReranker:
     """Cross-encoder reranker via a Cohere-style ``/v1/rerank`` HTTP endpoint.
 
-    Works with llama.cpp's ``llama-server --reranking`` (Qwen3-Reranker): POSTs ``{query,
-    documents}`` and reads ``{"results": [{"index", "relevance_score"}]}``. On any transport/parse
-    error it returns the input order unchanged (reranking is a refinement, never a hard dependency).
+    Works with vLLM's ``/v1/rerank`` (llama-nemotron-rerank-1b-v2) and llama.cpp's ``llama-server
+    --reranking`` (Qwen3-Reranker): POSTs ``{query, documents}`` and reads ``{"results": [{"index",
+    "relevance_score"}]}``. On any transport/parse error it returns the input order unchanged
+    (reranking is a refinement, never a hard dependency).
     """
 
     def __init__(
@@ -66,10 +70,12 @@ class HttpReranker:
         client: httpx.Client | None = None,
         cooldown: float = CIRCUIT_COOLDOWN,
         clock: Callable[[], float] = time.monotonic,
+        max_tokens: int = 0,
     ) -> None:
         base = url.rstrip("/")
         self._endpoint = base if base.endswith("rerank") else f"{base}/v1/rerank"
         self._model = model
+        self._max_tokens = max_tokens
         self._client = client or httpx.Client(
             timeout=httpx.Timeout(timeout, connect=CONNECT_TIMEOUT)
         )
@@ -85,6 +91,8 @@ class HttpReranker:
         payload: dict = {"query": query, "documents": [h.hit.text for h in hits]}
         if self._model:
             payload["model"] = self._model
+        if self._max_tokens > 0:  # vLLM trims an over-long pair instead of a 400 for the batch
+            payload["truncate_prompt_tokens"] = self._max_tokens
         try:
             resp = self._client.post(self._endpoint, json=payload)
             resp.raise_for_status()
@@ -110,5 +118,9 @@ class HttpReranker:
 def make_reranker(settings: Settings) -> Reranker | None:
     """Build a reranker: :class:`HttpReranker` when ``rerank_url`` is set, else ``None``."""
     if getattr(settings, "rerank_url", ""):
-        return HttpReranker(settings.rerank_url, model=settings.rerank_model)
+        return HttpReranker(
+            settings.rerank_url,
+            model=settings.rerank_model,
+            max_tokens=getattr(settings, "rerank_max_tokens", 0),
+        )
     return None

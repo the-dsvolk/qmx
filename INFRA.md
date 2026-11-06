@@ -1,8 +1,8 @@
 # qmx — Infrastructure Runbook
 
 How the running qmx deployment is wired: the **model backends** on the DGX Spark — the **vLLM
-embedder** container (Nemotron-3-Embed-1B), the **vLLM judge** container and the llama.cpp
-**reranker** — and the **qmx servers** (the primary local one on the
+embedder** container (Nemotron-3-Embed-1B), the **vLLM judge** container and the **vLLM
+reranker** container (llama-nemotron-rerank-1b-v2) — and the **qmx servers** (the primary local one on the
 Mac, plus an alternative resident one on the Spark, disabled since 2026-11-06). This is the
 concrete "what's actually running"; the design rationale is in
 [`plan/qmx-deployment.md`](./plan/qmx-deployment.md).
@@ -15,6 +15,8 @@ system services; user-space installs + `systemd --user` only.
 | Host | Service | Bind | Purpose |
 |---|---|---|---|
 | Spark `spark-0e81.local` | vLLM (OpenAI API), Docker `nemo-embed` | `0.0.0.0:8002` | **production embedder** `nemotron-3-embed-1b` (`embed_url = "http://spark-0e81.local:8002/v1"`) |
+| Spark `spark-0e81.local` | vLLM (`/v1/rerank`), Docker `nemo-rerank` | `0.0.0.0:8003` | **production reranker** `nemotron-rerank-1b` (`rerank_url = "http://spark-0e81.local:8003"`) |
+| Spark `spark-0e81.local` | llama.cpp (`qmx-rerank.service`, **disabled** 2026-11-06) | `:8081` | retired Qwen3-Reranker; unit + GGUF kept for rollback |
 | Spark `spark-0e81.local` | Ollama (`ollama.service`, **disabled** 2026-11-06) | `:11434` | retired Qwen embedder; model files kept for rollback |
 | Spark `spark-0e81.local` | vLLM (OpenAI API), Docker `qwen38-judge` | `:8000` | **production judge** `qwen3.8-judge` (`chat_url = "http://spark-0e81.local:8000/v1"`) |
 | Spark | qmx MCP (resident, `qmx-mcp.service`, **disabled** 2026-11-06) | `0.0.0.0:8765` | alternative deployment: shared index served to any client; unit + env file kept — re-enable with `systemctl --user enable --now qmx-mcp.service` (needs an embedder config first) |
@@ -173,10 +175,43 @@ systemctl --user enable --now qmx-mcp.service
 The clone at `~/GitHub/the-dsvolk/qmx` tracks `main` (`git pull` + `uv sync` + `systemctl --user
 restart qmx-mcp` to update). Index built with `qmx index <path>` into `~/.qmx/index.db`.
 
-## Spark — reranker server (`qmx-rerank.service`, GPU)
+## Spark — reranker server (`nemo-rerank`, GPU)
 
-A cross-encoder reranker: **llama.cpp `llama-server --reranking`** serving **Qwen3-Reranker-0.6B**
-on the GB10. Built from source (no prebuilt arm64/Blackwell image exists):
+Since 2026-11-06 the cross-encoder reranker is **`nvidia/llama-nemotron-rerank-1b-v2`** (rev
+`82876565`), Docker container **`nemo-rerank`** on the primary spark, the same vLLM image as the
+judge and embedder. It replaced Qwen3-Reranker-0.6B after the A/B in
+[`plan/qmx-rerank-nemotron.md`](./plan/qmx-rerank-nemotron.md) (known-item Recall@5 0.81 → 0.91,
+real-query nDCG@5 0.92 → 0.97, faster, ~6 GB instead of 10.7 GB).
+
+```bash
+# on spark-0e81 — weights pre-downloaded to ~/.cache/huggingface (pinned revision), then offline
+mkdir -p ~/nemo-rerank && python3 -c "open('$HOME/nemo-rerank/nemotron-rerank.jinja','w').write(
+ 'question:{{ (messages | selectattr(\"role\", \"eq\", \"query\") | first).content }}'
+ ' \n \n '
+ 'passage:{{ (messages | selectattr(\"role\", \"eq\", \"document\") | first).content }}')"
+docker run -d --name nemo-rerank --restart unless-stopped --gpus all --ipc=host -p 8003:8000 \
+  -e HF_HUB_OFFLINE=1 -v ~/.cache/huggingface:/root/.cache/huggingface \
+  -v ~/.cache/vllm-rerank:/root/.cache/vllm -v ~/nemo-rerank:/templates:ro \
+  vllm/vllm-openai:v0.33.0 nvidia/llama-nemotron-rerank-1b-v2 \
+  --revision 828765652b05bd439c9789d2a6d093db1caa1443 --served-model-name nemotron-rerank-1b \
+  --runner pooling --trust-remote-code --chat-template /templates/nemotron-rerank.jinja \
+  --dtype bfloat16 --max-model-len 8192 --gpu-memory-utilization 0.05
+curl -fsS http://spark-0e81.local:8003/v1/models    # from the Mac: lists nemotron-rerank-1b
+```
+
+- **The score template is required.** Without `--chat-template` vLLM does not apply the model's
+  `question:… passage:…` format and the scores are wrong (no error). A startup warning "No first
+  item, sequence was empty" is vLLM probing the template with a chat message; it is harmless.
+- **8,192-token limit per query+passage.** An over-long pair makes vLLM reject the whole request
+  (HTTP 400), and the client then keeps RRF order. Clients set `rerank_max_tokens = 8192`, which
+  sends `truncate_prompt_tokens` so the passage tail is trimmed instead.
+- **Rollback:** `systemctl --user enable --now qmx-rerank.service` (below), set `rerank_url` back to
+  `:8081` and `rerank_model = "qwen3-reranker"`, restart `com.qmx.serve`.
+
+### Retired: llama.cpp Qwen3-Reranker (`qmx-rerank.service`, disabled 2026-11-06)
+
+The previous reranker: **llama.cpp `llama-server --reranking`** serving **Qwen3-Reranker-0.6B**
+on the GB10. Unit and GGUF are kept for rollback. Built from source (no prebuilt arm64/Blackwell image exists):
 
 ```bash
 export PATH=/usr/local/cuda-13.0/bin:$PATH CUDACXX=/usr/local/cuda-13.0/bin/nvcc
@@ -191,7 +226,7 @@ uvx --from "huggingface_hub[cli]" hf download ggml-org/Qwen3-Reranker-0.6B-Q8_0-
 --reranking --host 0.0.0.0 --port 8081 -ngl 99 -b 8192 -ub 8192`
 (`Environment=LD_LIBRARY_PATH=/usr/local/cuda-13.0/lib64:%h/llama.cpp/build/bin`).
 `-b/-ub 8192` is required — the default 512 rejects long chunks (HTTP 500). Endpoint:
-`http://spark-0e81.local:8081/v1/rerank`. Clients enable it with `rerank_url` (off by default).
+`http://spark-0e81.local:8081/v1/rerank`.
 
 ## Spark — learnings/consolidation model (chat, GPU)
 
@@ -201,8 +236,8 @@ lesson, is this a dup or a supersede?). It does **not** run on Ollama: since 202
 Docker container **`qwen38-judge`** on the **primary** spark `spark-0e81` — vLLM v0.33.0 serving
 Qwen3.8-27B NVFP4 + DFlash2 speculative decoding as `qwen3.8-judge` on the OpenAI-compatible API
 at `:8000`, with `restart=unless-stopped` and `--gpu-memory-utilization 0.4` (≈47 GB, alongside
-the embedder and the reranker). A cold start takes **~8 min**. At boot the judge and the embedder
-(`nemo-embed`) come back through their Docker restart policies.
+the embedder and the reranker). A cold start takes **~8 min**. At boot the judge, the embedder
+(`nemo-embed`) and the reranker (`nemo-rerank`) come back through their Docker restart policies.
 
 ```bash
 docker ps --filter name=qwen38-judge                  # on spark-0e81: is the judge up?
@@ -391,7 +426,9 @@ Claude Code `settings.json` on the Mac — see the **Learnings** section of [`RE
     "http://spark-0f50.local:8000/v1"`). `chat_timeout = 300` (env `QMX_CHAT_TIMEOUT`) is the
     judge's timeout; sampling, caps and filing rules are the defaults (see *Judge client settings*
     above).
-  - **Reranker (optional):** `rerank_url = "http://spark-0e81.local:8081"` enables the cross-encoder.
+  - **Reranker (optional):** `rerank_url = "http://spark-0e81.local:8003"`,
+    `rerank_model = "nemotron-rerank-1b"` and `rerank_max_tokens = 8192` enable the cross-encoder
+    (env `QMX_RERANK_URL` / `QMX_RERANK_MODEL` / `QMX_RERANK_MAX_TOKENS`).
 - Claude Code: `claude mcp add --transport http --scope user qmx http://127.0.0.1:8765/mcp`.
 
 **launchd agents live in `~/Library/LaunchAgents/`** — they are **client-side machine state, not in
