@@ -377,19 +377,25 @@ def test_v2_retire_rules_say_a_replacement_is_not_an_alternative(rf):
     no rule for which wins; Lightning flip-flopped on the nightly -> monthly reversal."""
     p = build_judge("v2", reasoning_field=rf).prompts
     retire, decide = p.deprecate_system, p.consolidate_system
-    assert "A replacement counts" in retire and "supersedes" in retire
+    assert "A replacement counts" in retire and "supersedes" in retire and "instead of" in retire
     assert "even if CANDIDATE could also be called an alternative" in retire
+    # round 6: "corrects OLD's rule" / "prescribes a different choice" let Qwen retire on a
+    # corrected detail (#1142) or an added caveat (#1852, #2030); those must be explicit keeps
+    assert "corrects OLD's rule" not in retire and "prescribes a different choice" not in retire
+    assert "adds a condition, exception or caveat" in retire
     assert "inside a rule whose point still holds" in retire
     assert "corrects only a number, flag, path or price" not in retire
     assert "offers an alternative," not in retire
-    assert "replaces or supersedes it" in decide and "a replacement is not such an option" in decide
+    assert "replaces, supersedes or reverses it" in decide
+    assert "a replacement is not such an option" in decide
+    assert "an added condition, exception or caveat" in decide
     assert "inside a rule whose point still holds" in decide
 
 
 def test_v2_retire_examples_cover_both_verdicts_without_eval_topics():
     retire = build_judge("v2").prompts.deprecate_system
-    assert retire.count("OLD MAIN RULE '") == 4
-    assert retire.count("': retire") == 2 and retire.count("': keep") == 2
+    assert retire.count("OLD MAIN RULE '") == 5
+    assert retire.count("': retire") == 2 and retire.count("': keep") == 3
     lowered = retire.lower()
     for topic in ("worktree", "wash", "amt", "nightly check", "monthly", "keychain", "cud", "vpn"):
         assert topic not in lowered, topic  # examples must not leak the replay cases
