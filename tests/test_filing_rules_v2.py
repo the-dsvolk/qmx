@@ -370,6 +370,36 @@ def test_v2_merge_check_lists_are_capped_at_three():
     assert "up to three" in build_judge("v2").prompts.preserve_system
 
 
+@pytest.mark.parametrize("rf", [True, False])
+def test_v2_retire_rules_say_a_replacement_is_not_an_alternative(rf):
+    """Round 5 (2026-11-05): both Nemotron judges refused #38 -> #1530 ('Supersedes sibling ...').
+    The old text said 'corrects only a ... path' -> keep and 'offers an alternative' -> keep, with
+    no rule for which wins; Lightning flip-flopped on the nightly -> monthly reversal."""
+    p = build_judge("v2", reasoning_field=rf).prompts
+    retire, decide = p.deprecate_system, p.consolidate_system
+    assert "A replacement counts" in retire and "supersedes" in retire
+    assert "even if CANDIDATE could also be called an alternative" in retire
+    assert "inside a rule whose point still holds" in retire
+    assert "corrects only a number, flag, path or price" not in retire
+    assert "offers an alternative," not in retire
+    assert "replaces or supersedes it" in decide and "a replacement is not such an option" in decide
+    assert "inside a rule whose point still holds" in decide
+
+
+def test_v2_retire_examples_cover_both_verdicts_without_eval_topics():
+    retire = build_judge("v2").prompts.deprecate_system
+    assert retire.count("OLD MAIN RULE '") == 4
+    assert retire.count("': retire") == 2 and retire.count("': keep") == 2
+    lowered = retire.lower()
+    for topic in ("worktree", "wash", "amt", "nightly check", "monthly", "keychain", "cud", "vpn"):
+        assert topic not in lowered, topic  # examples must not leak the replay cases
+
+
+def test_v2_quote_rule_says_the_json_itself_is_standard():
+    assert "standard JSON" in QUOTE_RULE_V2 and "single quotes" in QUOTE_RULE_V2
+    assert "Inside a text value" in QUOTE_RULE_V2
+
+
 def test_v2_schemas():
     assert "old_core_claim" not in PRESERVE_SCHEMA_V2["properties"]
     assert list(PRESERVE_SCHEMA_V2["properties"]) == [
