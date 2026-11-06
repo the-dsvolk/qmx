@@ -362,6 +362,14 @@ def test_v2_decision_has_no_lean_towards_new(rf):
     assert "choose `new` only when they differ" in decide
 
 
+def test_v2_merge_check_lists_are_capped_at_three():
+    """Logged-only lists; uncapped, they ran long-lesson merge checks into the token cap."""
+    props = PRESERVE_SCHEMA_V2["properties"]
+    for name in ("lost_facts", "off_rule_additions", "unsupported_additions"):
+        assert props[name]["maxItems"] == 3
+    assert "up to three" in build_judge("v2").prompts.preserve_system
+
+
 def test_v2_schemas():
     assert "old_core_claim" not in PRESERVE_SCHEMA_V2["properties"]
     assert list(PRESERVE_SCHEMA_V2["properties"]) == [

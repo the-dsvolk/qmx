@@ -170,6 +170,20 @@ def test_reply_cut_off_at_the_cap_is_unusable_and_not_retried():
     assert len(posts) == 1
 
 
+def test_cut_off_reply_reports_how_it_ends():
+    """Tells a runaway (a long whitespace run) from a genuinely long answer, from the log alone."""
+    from qmx.chat import ChatReplyError
+
+    runaway = '{"reasoning": "the core claim is \\"kept' + " " * 400
+    chat = _openai([_reply(runaway, finish="length")], [])
+    with pytest.raises(ChatReplyError) as exc:
+        chat.complete_json("s", "u", schema=CONSOLIDATE_SCHEMA)
+    msg = str(exc.value)
+    assert msg.startswith("reply cut off at max_tokens=")
+    assert "the core claim is" in msg and "+ 400 whitespace chars" in msg
+    assert f"{len(runaway)} chars" in msg
+
+
 def test_non_json_reply_is_unusable():
     from qmx.chat import ChatReplyError
 

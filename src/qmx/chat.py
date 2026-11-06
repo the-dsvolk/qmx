@@ -36,6 +36,17 @@ class ChatBackendError(RuntimeError):
     """The judge is unreachable or broken (after retries). Callers defer: nothing is marked done."""
 
 
+def _reply_tail(text: str | None, n: int = 120) -> str:
+    """How a cut-off reply ends: its length and last ``n`` non-blank characters, plus the size of
+    any trailing whitespace run. Enough to tell a runaway loop (a long whitespace run — the
+    unescaped-quote loop of 2026-11-04 — or a repeated phrase) from a genuinely long answer."""
+    t = text or ""
+    body = t.rstrip()
+    ws = len(t) - len(body)
+    out = f"{len(t)} chars, ends {body[-n:]!r}"
+    return out + (f" + {ws} whitespace chars" if ws >= 20 else "")
+
+
 class ChatReplyError(RuntimeError):
     """The judge is up, but *this one reply* is unusable: cut off at the token cap, no reply before
     the timeout on a healthy server (a runaway generation), or not JSON. Callers fail safe for that
@@ -91,7 +102,8 @@ class OllamaChat:
         }
         body = self._post_with_retry("/api/chat", payload)
         if body.get("done_reason") == "length":
-            raise ChatReplyError(f"reply cut off at num_predict={cap}")
+            content = (body.get("message") or {}).get("content")
+            raise ChatReplyError(f"reply cut off at num_predict={cap}; {_reply_tail(content)}")
         return _parse_json_object(body["message"]["content"])
 
     def _options(self, cap: int) -> dict:
@@ -265,7 +277,9 @@ class OpenAIChat:
             else:
                 _log_usage(resp, cap)
                 if choice.get("finish_reason") == "length":
-                    raise ChatReplyError(f"reply cut off at max_tokens={cap}")
+                    raise ChatReplyError(
+                        f"reply cut off at max_tokens={cap}; {_reply_tail(content)}"
+                    )
                 return content or ""
             if attempt < self._max_retries - 1:
                 time.sleep(self._base_delay * (2**attempt))

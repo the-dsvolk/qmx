@@ -20,8 +20,9 @@ generated here because xgrammar (it pulls in torch) is too heavy a dependency fo
 Supported JSON-schema subset (what qmx's judge schemas use): objects with ordered ``properties``
 whose first property is required (it is always ``reasoning``), ``required``, ``type`` (string /
 number / integer / boolean / null, or a list of them), ``enum`` of JSON scalars, and ``array`` with
-``items``. Anything else raises :class:`UnsupportedSchema`; the client then falls back to
-``response_format``. Property order is preserved, so ``reasoning`` stays first (see consolidate).
+``items`` (and an optional ``maxItems``). Anything else raises :class:`UnsupportedSchema`; the
+client then falls back to ``response_format``. Property order is preserved, so ``reasoning`` stays
+first (see consolidate).
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ from dataclasses import dataclass
 
 _INDENT = 2
 _KEYWORDS = {"type", "properties", "required", "items", "enum", "description", "title",
-             "additionalProperties"}
+             "additionalProperties", "maxItems"}
 
 # Shared terminal rules (xgrammar EBNF syntax). A JSON string: no raw control characters, escapes
 # per RFC 8259. ``\x00`` rather than ``\0``: both parse in xgrammar, this one is unambiguous.
@@ -134,8 +135,19 @@ def _array(schema: dict, depth: int) -> _G:
     inner = _value(schema["items"], depth + 1)
     pad_in = "\n" + " " * (_INDENT * (depth + 1))
     pad_out = "\n" + " " * (_INDENT * depth)
-    full = _seq(_lit("[" + pad_in), inner, _star(_seq(_lit("," + pad_in), inner)),
-                _lit(pad_out + "]"))
+    more = _seq(_lit("," + pad_in), inner)
+    limit = schema.get("maxItems")
+    if limit is None:
+        rest = _star(more)
+    else:
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 0:
+            raise UnsupportedSchema(f"maxItems must be a non-negative integer: {limit!r}")
+        if limit == 0:
+            return _lit("[]")
+        rest = _G("", "")  # up to limit-1 more items, as nested optionals
+        for _ in range(limit - 1):
+            rest = _opt(_seq(more, rest))
+    full = _seq(_lit("[" + pad_in), inner, rest, _lit(pad_out + "]"))
     return _alt(full, _lit("[]"))
 
 
