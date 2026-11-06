@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import httpx
@@ -75,6 +76,33 @@ def test_make_reranker_from_settings():
     )
     assert isinstance(make_reranker(on), HttpReranker)
     assert on.rerank_url == "http://spark-0e81.local:8081"
+
+
+def test_http_reranker_sends_truncation_only_when_set():
+    payloads = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        payloads.append(json.loads(req.content))
+        return httpx.Response(200, json={"results": []})
+
+    HttpReranker("http://spark:8003", model="m", client=_client(handler)).rerank("q", _hits("x"))
+    HttpReranker("http://spark:8003", model="m", max_tokens=8192,
+                 client=_client(handler)).rerank("q", _hits("x"))
+    assert "truncate_prompt_tokens" not in payloads[0]  # default: field not sent (llama.cpp-safe)
+    assert payloads[1]["truncate_prompt_tokens"] == 8192
+    assert payloads[1]["model"] == "m" and payloads[1]["documents"] == ["x"]
+
+
+def test_make_reranker_passes_max_tokens():
+    s = Settings.load(
+        config_path=Path("/does/not/exist"),
+        env={"QMX_RERANK_URL": "http://spark-0e81.local:8003", "QMX_RERANK_MAX_TOKENS": "8192"},
+    )
+    assert s.rerank_max_tokens == 8192
+    rr = make_reranker(s)
+    assert isinstance(rr, HttpReranker) and rr._max_tokens == 8192
+    off = Settings.load(config_path=Path("/does/not/exist"), env={})
+    assert off.rerank_max_tokens == 0
 
 
 def test_noop_still_passthrough():
