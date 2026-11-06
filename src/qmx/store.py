@@ -16,6 +16,7 @@ Schema v3 separates chunk **content** from its **mentions** — the robustness c
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import sqlite3
 from collections.abc import Iterable, Sequence
@@ -625,7 +626,13 @@ class Store:
         *,
         include_retired: bool = False,
     ) -> list[SearchHit]:
-        """Cosine top-k over live (mentioned) chunks, optionally filtered by ``kind``."""
+        """Cosine top-k over live (mentioned) chunks, optionally filtered by ``kind``.
+
+        With a ``kind``, the result is the exact top-k *of that kind*. The global KNN below is
+        tried first; if fewer than ``k`` hits of the kind survive it (a small kind such as
+        ``learning`` — ~2% of chunks — is crowded out by the chats that discuss the same topic),
+        an exact scan restricted to the kind runs instead (:meth:`_search_vec_kind`).
+        """
         if len(query_embedding) != self._embed_dim:
             raise ValueError(f"query dim {len(query_embedding)} != {self._embed_dim}")
         # Over-fetch: the ANN table may still hold tombstoned (orphan) vectors that the mentions
@@ -645,6 +652,59 @@ class Store:
             (sqlite_vec.serialize_float32(list(query_embedding)), fetch),
         ).fetchall()
         rows = self._drop_retired(rows, include_retired)
+        hits = _rows_to_hits(rows, k, kind, distance_key="distance")
+        if kind is not None and len(hits) < k:
+            # Exact either way: if >= k hits of the kind are in the global top-`fetch`, they are
+            # that kind's top-k; otherwise rank the kind's own vectors.
+            return self._search_vec_kind(query_embedding, k, kind, include_retired=include_retired)
+        return hits
+
+    def _search_vec_kind(
+        self,
+        query_embedding: Sequence[float],
+        k: int,
+        kind: str,
+        *,
+        include_retired: bool = False,
+    ) -> list[SearchHit]:
+        """Exact cosine top-k over the live chunks of one ``kind``.
+
+        sqlite-vec KNN restricted to that kind's chunk ids (``chunk_id IN (...)``), so the ranking
+        never sees the other kinds. Before this, a kind filter applied *after* a global
+        top-``k*4``: the consolidation judge was shown no existing lesson for 22% of the
+        candidates it filed and 1-3 for 48% (eval, 2026-11-05), so it could only file
+        near-duplicates. ~50 ms for ~2K lessons.
+        """
+        ids = [
+            r[0]
+            for r in self._conn.execute(
+                f"""
+                SELECT c.chunk_id FROM documents d
+                JOIN mentions m ON m.doc_id = d.doc_id
+                JOIN chunks c ON c.chunk_id = m.chunk_id
+                WHERE d.kind = ? AND m.mention_id = {_REP_MENTION}
+                """,
+                (kind,),
+            ).fetchall()
+        ]
+        if not ids:
+            return []
+        fetch = min(max(k * 4, k + 20), len(ids))  # headroom for retired lessons dropped below
+        rows = self._conn.execute(
+            f"""
+            SELECT v.chunk_id, v.distance, c.text,
+                   m.doc_id, m.start_line, m.end_line, m.symbol, d.kind, d.path
+            FROM vec_chunks v
+            JOIN chunks c ON c.chunk_id = v.chunk_id
+            JOIN mentions m ON m.mention_id = {_REP_MENTION}
+            JOIN documents d ON d.doc_id = m.doc_id
+            WHERE v.embedding MATCH ? AND k = ?
+              AND v.chunk_id IN (SELECT value FROM json_each(?))
+            ORDER BY v.distance
+            """,
+            (sqlite_vec.serialize_float32(list(query_embedding)), fetch, json.dumps(ids)),
+        ).fetchall()
+        rows = self._drop_retired(rows, include_retired)
         return _rows_to_hits(rows, k, kind, distance_key="distance")
 
     def search_fts(
@@ -655,11 +715,17 @@ class Store:
         *,
         include_retired: bool = False,
     ) -> list[SearchHit]:
-        """BM25 top-k over live chunks via FTS5, optionally filtered by ``kind``."""
+        """BM25 top-k over live chunks via FTS5, optionally filtered by ``kind``.
+
+        The kind filter is part of the query (before ``LIMIT``), so a small kind is not crowded
+        out by the chats that match the same words (see :meth:`_search_vec_kind`).
+        """
         match = _fts_match_query(query)
         if match is None:
             return []
         fetch = max(k * 4, k + 20)
+        kind_sql = "AND d.kind = ?" if kind is not None else ""
+        params: tuple = (match, kind, fetch) if kind is not None else (match, fetch)
         rows = self._conn.execute(
             f"""
             SELECT f.rowid AS chunk_id, f.rank AS distance, c.text,
@@ -668,11 +734,11 @@ class Store:
             JOIN chunks c ON c.chunk_id = f.rowid
             JOIN mentions m ON m.mention_id = {_REP_MENTION}
             JOIN documents d ON d.doc_id = m.doc_id
-            WHERE fts_chunks MATCH ?
+            WHERE fts_chunks MATCH ? {kind_sql}
             ORDER BY f.rank
             LIMIT ?
             """,
-            (match, fetch),
+            params,
         ).fetchall()
         rows = self._drop_retired(rows, include_retired)
         return _rows_to_hits(rows, k, kind, distance_key="distance")
