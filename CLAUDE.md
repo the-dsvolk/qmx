@@ -20,10 +20,11 @@ add on-the-fly chat capture.
 ## Intended stack (finalize after the rewrite-approach decision)
 
 - **Python 3.12**, managed with **`uv`** (never bare `python`/`pip`).
-- **Embeddings / rerank / summarize:** the **Qwen** family (Qwen3-Embedding, Qwen3-Reranker, a Qwen
-  chat model as the learnings judge) — one Apache-2.0 stack, served on the **DGX Spark**
-  (GB10/CUDA): embeddings by **Ollama**, the reranker by **llama.cpp**, and the judge (Qwen3.8-27B,
-  `qwen3.8-judge`) by **vLLM** through its OpenAI-compatible API. qmx is a thin HTTP client. See
+- **Embeddings / rerank / summarize:** embeddings by **Nemotron-3-Embed-1B** (since 2026-11-06,
+  replacing Qwen3-Embedding — see `plan/qmx-embed-nemotron.md`), the reranker **Qwen3-Reranker**,
+  and a Qwen chat model as the learnings judge — served on the **DGX Spark** (GB10/CUDA): the
+  embedder by **vLLM** (`nemo-embed`), the reranker by **llama.cpp**, and the judge (Qwen3.8-27B,
+  `qwen3.8-judge`) by **vLLM**, both vLLM servers through the OpenAI-compatible API. qmx is a thin HTTP client. See
   `plan/qmx-deployment.md` for the Mac-dev / Spark-prod topology and `INFRA.md` for what runs where.
 - **Store:** SQLite with `sqlite-vec` (vectors) + FTS5 (BM25). Content-hash tables for incremental
   reindex + dedup.
@@ -49,6 +50,6 @@ add on-the-fly chat capture.
 > Status: in daily use — indexing, hybrid search + rerank, the MCP server, chat memory, learnings
 > and nightly consolidation have all landed (README "Status"); the consolidation judge is still
 > being tuned (filing rules v2 is opt-in). Approach: from-scratch (not a qmd fork); models on the
-> Spark (Ollama embeddings, llama.cpp reranker, vLLM judge); the qmx MCP server, index and
+> Spark (vLLM embedder, llama.cpp reranker, vLLM judge); the qmx MCP server, index and
 > nightly jobs run on the Mac, with a Spark-hosted server as the alternative. `plan/` holds the
 > original design records (esp. `qmx-deployment.md`, `qmx-plan.md`).
