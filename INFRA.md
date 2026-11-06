@@ -3,8 +3,9 @@
 How the running qmx deployment is wired: the **model backends** on the DGX Spark — the **vLLM
 embedder** container (Nemotron-3-Embed-1B), the **vLLM judge** container and the llama.cpp
 **reranker** — and the **qmx servers** (the primary local one on the
-Mac, plus an alternative resident one on the Spark). This is the concrete "what's actually
-running"; the design rationale is in [`plan/qmx-deployment.md`](./plan/qmx-deployment.md).
+Mac, plus an alternative resident one on the Spark, disabled since 2026-11-06). This is the
+concrete "what's actually running"; the design rationale is in
+[`plan/qmx-deployment.md`](./plan/qmx-deployment.md).
 
 Everything on the Spark is installed **rootless** — it has no passwordless `sudo`, so no `apt`, no
 system services; user-space installs + `systemd --user` only.
@@ -16,7 +17,7 @@ system services; user-space installs + `systemd --user` only.
 | Spark `spark-0e81.local` | vLLM (OpenAI API), Docker `nemo-embed` | `0.0.0.0:8002` | **production embedder** `nemotron-3-embed-1b` (`embed_url = "http://spark-0e81.local:8002/v1"`) |
 | Spark `spark-0e81.local` | Ollama (`ollama.service`, **disabled** 2026-11-06) | `:11434` | retired Qwen embedder; model files kept for rollback |
 | Spark `spark-0e81.local` | vLLM (OpenAI API), Docker `qwen38-judge` | `:8000` | **production judge** `qwen3.8-judge` (`chat_url = "http://spark-0e81.local:8000/v1"`) |
-| Spark | qmx MCP (resident) | `0.0.0.0:8765` | alternative deployment: shared index served to any client |
+| Spark | qmx MCP (resident, `qmx-mcp.service`, **disabled** 2026-11-06) | `0.0.0.0:8765` | alternative deployment: shared index served to any client; unit + env file kept — re-enable with `systemctl --user enable --now qmx-mcp.service` (needs an embedder config first) |
 | Second spark `spark-0f50.local` | vLLM | `:8001` | judge experiments (Nemotron 3.5 Super); not production |
 | Second spark `spark-0f50.local` | vLLM, Docker `qwen38-judge` (stopped, `restart=no`) | `:8000` | judge **fallback** only — see *Fallback* below |
 | Mac | qmx MCP (local) | `127.0.0.1:8765` | **primary**: personal index, what Claude Code connects to (Architecture B) |
@@ -121,7 +122,14 @@ curl -fsS http://localhost:11434/api/version # from the Spark
 **Reboot survival = linger `yes` + unit `enabled` + `WantedBy=default.target`.** `Restart=on-failure`
 covers crashes.
 
-## Spark — resident qmx MCP server (shared index)
+## Spark — resident qmx MCP server (shared index; disabled 2026-11-06)
+
+> `qmx-mcp.service` is stopped and **disabled** since 2026-11-06: nothing used it (Claude Code talks
+> to the Mac-local server), its `~/.qmx/index.db` was a stale July test index, and its embedder was
+> the retired Ollama. The unit file, `~/.config/qmx/env`, `~/.qmx/` and the clone are kept. To bring
+> it back, first point the env file at a live embedder (the `nemo-embed` vLLM above, same settings
+> as the client side as `QMX_*` vars) and rebuild the index, then
+> `systemctl --user enable --now qmx-mcp.service`.
 
 An alternative to the Mac-local server (which is what Claude Code uses in this deployment): serves a
 shared index to any client on the LAN. Runs from the checked-out repo via `uv run`.
