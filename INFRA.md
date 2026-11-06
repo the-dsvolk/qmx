@@ -1,8 +1,8 @@
 # qmx — Infrastructure Runbook
 
-How the running qmx deployment is wired: the **model backends** on the DGX Spark — **Ollama** for
-embeddings (installed, persisted across reboots, and bound for LAN access), the **vLLM judge**
-container and the llama.cpp **reranker** — and the **qmx servers** (the primary local one on the
+How the running qmx deployment is wired: the **model backends** on the DGX Spark — the **vLLM
+embedder** container (Nemotron-3-Embed-1B), the **vLLM judge** container and the llama.cpp
+**reranker** — and the **qmx servers** (the primary local one on the
 Mac, plus an alternative resident one on the Spark). This is the concrete "what's actually
 running"; the design rationale is in [`plan/qmx-deployment.md`](./plan/qmx-deployment.md).
 
@@ -13,14 +13,15 @@ system services; user-space installs + `systemd --user` only.
 
 | Host | Service | Bind | Purpose |
 |---|---|---|---|
-| Spark `spark-0e81.local` | Ollama | `0.0.0.0:11434` | Qwen embeddings (GPU); reachable on the LAN |
+| Spark `spark-0e81.local` | vLLM (OpenAI API), Docker `nemo-embed` | `0.0.0.0:8002` | **production embedder** `nemotron-3-embed-1b` (`embed_url = "http://spark-0e81.local:8002/v1"`) |
+| Spark `spark-0e81.local` | Ollama (`ollama.service`, **disabled** 2026-11-06) | `:11434` | retired Qwen embedder; model files kept for rollback |
 | Spark `spark-0e81.local` | vLLM (OpenAI API), Docker `qwen38-judge` | `:8000` | **production judge** `qwen3.8-judge` (`chat_url = "http://spark-0e81.local:8000/v1"`) |
 | Spark | qmx MCP (resident) | `0.0.0.0:8765` | alternative deployment: shared index served to any client |
 | Second spark `spark-0f50.local` | vLLM | `:8001` | judge experiments (Nemotron 3.5 Super); not production |
 | Second spark `spark-0f50.local` | vLLM, Docker `qwen38-judge` (stopped, `restart=no`) | `:8000` | judge **fallback** only — see *Fallback* below |
 | Mac | qmx MCP (local) | `127.0.0.1:8765` | **primary**: personal index, what Claude Code connects to (Architecture B) |
 
-LAN-only trust model: the `0.0.0.0` binds expose Ollama and the Spark MCP to the local network
+LAN-only trust model: the `0.0.0.0` binds expose the model servers and the Spark MCP to the local network
 (mDNS `*.local`). Fine on a trusted LAN — do **not** do this on an untrusted network without a
 firewall/reverse proxy.
 
@@ -41,7 +42,40 @@ firewall/reverse proxy.
   it** and Ollama 0.32.1 auto-selects it (≈118 GiB VRAM available). GPU inference works.
 - **Model:** `ollama pull qwen3-embedding:0.6b` — output **dim 1024** (matches qmx's `embed_dim`).
 
-## Spark — persist Ollama across reboots + bind for remote access
+## Spark — the embedder: Nemotron-3-Embed-1B on vLLM (production since 2026-11-06)
+
+Docker container **`nemo-embed`** on the primary spark, the same vLLM image as the judge (tagged
+`vllm/vllm-openai:v0.33.0`), with `restart=unless-stopped` and `HF_HUB_OFFLINE=1` so a reboot needs
+no network. ~7 GiB in total (2.2 GiB of weights, `--gpu-memory-utilization 0.04`). The model emits
+2048 values; qmx keeps the first 1024 and re-normalises (`embed_dim = 1024`). Why this model, the
+A/B evidence and the recalibrated thresholds: [`plan/qmx-embed-nemotron.md`](./plan/qmx-embed-nemotron.md).
+
+```bash
+docker run -d --name nemo-embed --restart unless-stopped --gpus all --ipc=host -p 8002:8000 \
+  -v ~/.cache/huggingface:/root/.cache/huggingface -v ~/.cache/vllm-embed:/root/.cache/vllm \
+  -e HF_HUB_OFFLINE=1 vllm/vllm-openai:v0.33.0 nvidia/Nemotron-3-Embed-1B-BF16 \
+  --revision c0c9fea93ea424587517f2c59e20db9f1d6bf615 --served-model-name nemotron-3-embed-1b \
+  --runner pooling --dtype bfloat16 --max-model-len 8192 --gpu-memory-utilization 0.04
+curl -fsS http://spark-0e81.local:8002/v1/models    # from the Mac: lists nemotron-3-embed-1b
+```
+
+The weights must be in the Hugging Face cache first (offline mode), e.g. a one-off
+`docker run --rm ... --entrypoint python3 <image> -c "from huggingface_hub import snapshot_download; snapshot_download('nvidia/Nemotron-3-Embed-1B-BF16', revision='c0c9fea9…')"`.
+
+Client side (`~/.qmx/config.toml`): `embed_backend = "openai"`, `embed_url`, `embed_model`,
+`embed_dim = 1024`, `embed_query_prefix = "query: "`, `embed_passage_prefix = "passage: "`,
+`embed_max_tokens = 8192`, plus the Nemotron cut-offs `dedup_min_similarity = 0.50` and
+`parked_similar_max_distance = 0.45`.
+
+**Rollback to the Qwen embedder:** `systemctl --user enable --now ollama.service
+ollama-warmup.service` on the spark; on the Mac stop the qmx services, restore
+`~/.qmx/config.toml.bak-20261106-nemo-embed` and `~/.qmx/index-qwen-20261106.db` (it lacks anything
+indexed since the switch — `qmx reembed` it from the current index instead to keep that), restart.
+
+## Spark — persist Ollama across reboots + bind for remote access (retired 2026-11-06)
+
+> Ollama served the Qwen embedder until 2026-11-06; `ollama.service` and `ollama-warmup.service` are
+> now **disabled** (model files kept). Kept for rollback and history.
 
 Ollama runs as a **`systemd --user`** service, **bound to `0.0.0.0`** so the Mac can embed against
 it over the LAN (it was originally `127.0.0.1`, unreachable off-box).
@@ -159,9 +193,8 @@ lesson, is this a dup or a supersede?). It does **not** run on Ollama: since 202
 Docker container **`qwen38-judge`** on the **primary** spark `spark-0e81` — vLLM v0.33.0 serving
 Qwen3.8-27B NVFP4 + DFlash2 speculative decoding as `qwen3.8-judge` on the OpenAI-compatible API
 at `:8000`, with `restart=unless-stopped` and `--gpu-memory-utilization 0.4` (≈47 GB, alongside
-the Ollama embedder and the reranker). A cold start takes **~8 min**. At boot the primary spark
-preloads only the embedder (`ollama-warmup.service`); the judge comes back through its Docker
-restart policy.
+the embedder and the reranker). A cold start takes **~8 min**. At boot the judge and the embedder
+(`nemo-embed`) come back through their Docker restart policies.
 
 ```bash
 docker ps --filter name=qwen38-judge                  # on spark-0e81: is the judge up?

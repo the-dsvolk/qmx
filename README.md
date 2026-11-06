@@ -6,7 +6,8 @@ qmx indexes source repositories (AST-aware) and your Claude Code conversation hi
 on-device vector + full-text index, and serves them by *meaning* to agents via MCP — or to you on
 the command line. Everything runs on hardware you control — no cloud service.
 
-Powered by the [Qwen](https://github.com/QwenLM) embedding/rerank models and
+Powered by [Nemotron](https://huggingface.co/nvidia/Nemotron-3-Embed-1B-BF16) embeddings, the
+[Qwen](https://github.com/QwenLM) reranker/judge models and
 [`sqlite-vec`](https://github.com/asg017/sqlite-vec). Derived from
 [`tobi/qmd`](https://github.com/tobi/qmd) (MIT).
 
@@ -38,7 +39,7 @@ flowchart LR
   end
 
   subgraph SPARK["DGX Spark — GPU (models only)"]
-    E["Qwen embeddings<br/>(Ollama)"]
+    E["Nemotron embeddings<br/>(vLLM)"]
     C["Qwen3.8 judge · vLLM<br/>(learnings / consolidation)"]
     R["Qwen reranker<br/>(llama.cpp)"]
   end
@@ -49,8 +50,8 @@ flowchart LR
   CON -->|"consolidate chats → lessons"| C
 ```
 
-- **DGX Spark (GPU)** — runs the **Qwen models only**: **embeddings** (Ollama), the **reranker**
-  (llama.cpp), and the **judge** that distils chats into *learnings* (Qwen3.8 on vLLM). Text is sent
+- **DGX Spark (GPU)** — runs the **models only**: **embeddings** (Nemotron-3-Embed-1B on vLLM), the
+  **reranker** (Qwen3-Reranker on llama.cpp), and the **judge** that distils chats into *learnings* (Qwen3.8 on vLLM). Text is sent
   for compute; **nothing is stored there**.
 - **Your Mac (the client)** — holds the **local index** (SQLite: `sqlite-vec` vectors + FTS5/BM25)
   and runs the **MCP server** and **consolidation** (`qmx consolidate`). It does the actual
@@ -58,12 +59,13 @@ flowchart LR
 - **Claude Code (you)** — talks to the Mac's MCP server (`query` / `recall` / `lessons` / …); it
   never touches the Spark directly.
 
-A few config knobs point the Mac at the Spark: `QMX_OLLAMA_URL` (embeddings), `chat_url` (the
+A few config knobs point the Mac at the Spark: `embed_url` (embeddings), `chat_url` (the
 judge) and, optionally, `rerank_url`. In more detail, qmx is two cooperating pieces:
 
 - **qmx** (this tool) — the **index and search**: chunking, the SQLite store (`sqlite-vec` + FTS5),
   hybrid ranking, the CLI, and the MCP server all run **on your machine**.
-- **Model servers** — an **Ollama backend** produces the **embeddings** with a **Qwen** model. For
+- **Model servers** — an **embedding server** produces the **embeddings**: vLLM serving
+  Nemotron-3-Embed-1B in production (`embed_backend = "openai"`), or Ollama (the default). For
   the learnings tier, the **judge** (a Qwen chat model) runs on an OpenAI-compatible server — vLLM
   in production (`chat_backend = "openai"`); optionally a llama.cpp **reranker**. They can be the
   *same* machine, or a GPU box on your LAN (e.g. a DGX Spark). The only thing that crosses to them
@@ -80,7 +82,7 @@ flowchart LR
     DB[("SQLite index<br/>sqlite-vec · FTS5 · hashes")]
   end
   subgraph B["Ollama backend · GPU"]
-    E["qwen3-embedding<br/>(Qwen)"]
+    E["Nemotron-3-Embed-1B<br/>(vLLM)"]
   end
   C -- "chunk text" --> E
   E -- "vectors" --> DB
@@ -99,7 +101,7 @@ flowchart LR
     DB --> SR --> H
   end
   subgraph B["Ollama backend · GPU"]
-    E["qwen3-embedding<br/>(Qwen)"]
+    E["Nemotron-3-Embed-1B<br/>(vLLM)"]
   end
   QT -- "query text" --> E
   E -- "1 vector" --> SR
@@ -124,7 +126,7 @@ flowchart LR
     RC["recall<br/>(query --kind chat)"]
   end
   subgraph B["Ollama backend · GPU"]
-    E["qwen3-embedding<br/>(Qwen)"]
+    E["Nemotron-3-Embed-1B<br/>(vLLM)"]
   end
   H -- "transcript path (stdin)" --> CAP
   T --> BF --> CLEAN
@@ -161,8 +163,8 @@ flowchart LR
 (Delete → the file's chunks are dropped; move → drop old + index new. `busy_timeout` lets watch,
 the capture hook, and `refresh` write the flat KB concurrently.)
 
-Choose where the embedding backend lives with `QMX_OLLAMA_URL` and which model embeds with
-`embed_model` (see [QUICKSTART.md](./QUICKSTART.md)).
+Choose where the embedding backend lives with `embed_backend` + `embed_url` (or `QMX_OLLAMA_URL`
+for Ollama) and which model embeds with `embed_model` (see [QUICKSTART.md](./QUICKSTART.md)).
 
 **Reranking (optional)** — when `rerank_url` is set, the RRF top candidates are re-scored by a
 cross-encoder (**Qwen3-Reranker** via llama.cpp `--reranking` on the Spark GPU) and trimmed to `k`.
