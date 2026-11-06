@@ -30,6 +30,10 @@ log = logging.getLogger("qmx.chat")
 # misconfigured server would otherwise fail every call "safely" and the run would mark sessions
 # consolidated on nothing but fallbacks.
 _MAX_UNUSABLE_STREAK = 3
+# A cut-off reply ending in at least this much whitespace is the free-whitespace runaway (one
+# unescaped `"` closes a JSON string, then the schema grammar admits newlines until the cap). Real
+# replies end in "}"; the eval runaways ended in 400-9,600 whitespace characters.
+_RUNAWAY_WHITESPACE = 200
 
 
 class ChatBackendError(RuntimeError):
@@ -45,6 +49,20 @@ def _reply_tail(text: str | None, n: int = 120) -> str:
     ws = len(t) - len(body)
     out = f"{len(t)} chars, ends {body[-n:]!r}"
     return out + (f" + {ws} whitespace chars" if ws >= 20 else "")
+
+
+class _RunawayReply(Exception):
+    """Internal: this reply ran away (whitespace loop or a timeout on a healthy server); the
+    client may retry it once with the fixed-layout grammar before reporting a ChatReplyError."""
+
+    def __init__(self, error: ChatReplyError) -> None:
+        super().__init__(str(error))
+        self.error = error
+
+
+def _is_whitespace_runaway(text: str | None) -> bool:
+    t = text or ""
+    return len(t) - len(t.rstrip()) >= _RUNAWAY_WHITESPACE
 
 
 class ChatReplyError(RuntimeError):
@@ -159,7 +177,11 @@ class OpenAIChat:
     "indent" (opt-in) sends a per-request grammar admitting exactly ``json.dumps(obj, indent=2)``
     (``structured_outputs.grammar``, see :mod:`qmx.grammar`) — ``response_format``'s free whitespace
     lets a prematurely closed string loop on newlines until the token cap; "indent" falls back to
-    "schema" when a server rejects grammars or a schema is outside the subset.
+    "schema" when a server rejects grammars or a schema is outside the subset. Under "schema", a
+    reply that runs away (cut off in a long whitespace run, or no reply before the timeout while the
+    server is up) is retried **once** with the fixed-layout grammar: no free whitespace, so the loop
+    cannot recur, at 3-5x slower decoding paid only on those calls (eval 2026-11-05: every remaining
+    cut-off merge check on long lessons was this loop). A genuinely long reply is not retried.
 
     Failure split: connection errors / 5xx are retried and end in :class:`ChatBackendError`
     (defer). A reply cut off at the cap, a non-JSON reply, or a read timeout while ``/models``
@@ -187,6 +209,8 @@ class OpenAIChat:
         self._timeout = settings.chat_timeout
         self._url = settings.chat_url.rstrip("/")
         self._unusable_streak = 0
+        self._grammar_ok = True  # False once the server rejects per-request grammars
+        self.runaway_retries = 0  # fixed-layout retries attempted (for logs/harnesses)
         key = settings.chat_api_key
         headers = {"Authorization": f"Bearer {key}"} if key else {}
         self._owns_client = client is None
@@ -199,7 +223,10 @@ class OpenAIChat:
     ) -> dict:
         cap = _effective_cap(self._max_tokens, max_tokens)
         try:
-            content = self._complete(system, user, schema, cap)
+            try:
+                content = self._complete(system, user, schema, cap)
+            except _RunawayReply as runaway:
+                content = self._retry_fixed_layout(system, user, schema, cap, runaway.error)
             reply = _parse_json_object(content)
             if not reply:
                 raise ChatReplyError(f"reply is not a JSON object: {content[:120]!r}")
@@ -214,7 +241,28 @@ class OpenAIChat:
         self._unusable_streak = 0
         return reply
 
-    def _payload(self, system: str, user: str, schema: dict | None, cap: int) -> dict:
+    def _retry_fixed_layout(
+        self, system: str, user: str, schema: dict | None, cap: int, error: ChatReplyError
+    ) -> str:
+        """One retry of a runaway reply under the fixed-layout grammar; else re-raise ``error``."""
+        if schema is None or self._layout != "schema" or not self._grammar_ok:
+            raise error
+        try:
+            json_grammar(schema)
+        except UnsupportedSchema:
+            raise error from None
+        self.runaway_retries += 1
+        log.warning("%s; retrying once with the fixed-layout grammar", error)
+        try:
+            content = self._complete(system, user, schema, cap, layout="indent")
+        except _RunawayReply as again:
+            raise again.error from error
+        log.warning("fixed-layout retry succeeded")
+        return content
+
+    def _payload(
+        self, system: str, user: str, schema: dict | None, cap: int, layout: str | None = None
+    ) -> dict:
         # Key order is part of the contract: with default settings the body is byte-identical to
         # what the Qwen3.8 judge was validated with (tests/test_judge_settings.py pins it).
         kwargs: dict = {"enable_thinking": self._think is not False}
@@ -237,7 +285,7 @@ class OpenAIChat:
         if schema is None:
             payload["response_format"] = {"type": "json_object"}
             return payload
-        if self._layout == "indent":
+        if (layout or self._layout) == "indent":
             try:
                 payload["structured_outputs"] = {"grammar": json_grammar(schema)}
                 return payload
@@ -247,14 +295,23 @@ class OpenAIChat:
             "type": "json_schema", "json_schema": {"name": "qmx", "schema": schema}}
         return payload
 
-    def _complete(self, system: str, user: str, schema: dict | None, cap: int) -> str:
-        payload = self._payload(system, user, schema, cap)
+    def _complete(
+        self, system: str, user: str, schema: dict | None, cap: int, layout: str | None = None
+    ) -> str:
+        """One request (with connection retries). Raises :class:`_RunawayReply` for a runaway,
+        :class:`ChatReplyError` for any other unusable reply, :class:`ChatBackendError` when the
+        server is unreachable. ``layout`` overrides ``chat_json_layout`` for this call only."""
+        payload = self._payload(system, user, schema, cap, layout)
         last_exc: Exception | None = None
         for attempt in range(self._max_retries):
             try:
                 resp = self._client.post("/chat/completions", json=payload)
                 if (resp.status_code == 400 and "structured_outputs" in payload
                         and _mentions_grammar(resp.text)):
+                    if layout is not None:  # the fixed-layout retry itself: no second fallback
+                        self._grammar_ok = False
+                        raise ChatReplyError("fixed-layout retry rejected by the server: "
+                                             f"{resp.text[:120]}")
                     # A server without per-request grammars: fall back for the rest of the run.
                     log.warning("judge rejected the fixed-layout grammar (%s); falling back to "
                                 "response_format — runaway whitespace loops are possible again",
@@ -267,19 +324,22 @@ class OpenAIChat:
                 content = choice["message"]["content"]
             except httpx.ReadTimeout as exc:
                 if self._healthy():
-                    raise ChatReplyError(
+                    raise _RunawayReply(ChatReplyError(
                         f"no reply within {self._timeout:.0f}s although the server is up "
                         "(runaway generation?)"
-                    ) from exc
+                    )) from exc
                 last_exc = exc
             except (httpx.HTTPError, KeyError, IndexError, TypeError) as exc:
                 last_exc = exc
             else:
                 _log_usage(resp, cap)
                 if choice.get("finish_reason") == "length":
-                    raise ChatReplyError(
+                    error = ChatReplyError(
                         f"reply cut off at max_tokens={cap}; {_reply_tail(content)}"
                     )
+                    if _is_whitespace_runaway(content):
+                        raise _RunawayReply(error)
+                    raise error
                 return content or ""
             if attempt < self._max_retries - 1:
                 time.sleep(self._base_delay * (2**attempt))

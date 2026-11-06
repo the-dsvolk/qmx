@@ -175,7 +175,8 @@ def test_cut_off_reply_reports_how_it_ends():
     from qmx.chat import ChatReplyError
 
     runaway = '{"reasoning": "the core claim is \\"kept' + " " * 400
-    chat = _openai([_reply(runaway, finish="length")], [])
+    # fixed layout already on, so the runaway is reported rather than retried (see below)
+    chat = _openai([_reply(runaway, finish="length")], [], chat_json_layout="indent")
     with pytest.raises(ChatReplyError) as exc:
         chat.complete_json("s", "u", schema=CONSOLIDATE_SCHEMA)
     msg = str(exc.value)
@@ -195,10 +196,11 @@ def test_read_timeout_on_a_healthy_server_is_a_runaway_not_an_outage():
     from qmx.chat import ChatReplyError
 
     posts: list[dict] = []
-    chat = _openai([httpx.ReadTimeout], posts, healthy=True)
+    chat = _openai([httpx.ReadTimeout, httpx.ReadTimeout], posts, healthy=True)
     with pytest.raises(ChatReplyError, match="runaway"):
         chat.complete_json("s", "u", schema=CONSOLIDATE_SCHEMA)
-    assert len(posts) == 1  # was: five 300 s retries, then the whole run deferred
+    # was: five 300 s retries, then the whole run deferred; now one fixed-layout retry at most
+    assert len(posts) == 2 and "structured_outputs" in posts[1]
 
 
 def test_read_timeout_on_a_dead_server_is_retried_then_defers():
@@ -266,3 +268,77 @@ def test_ollama_per_call_cap_and_cut_off_reply():
     client = httpx.Client(base_url="http://ollama.test", transport=httpx.MockTransport(cut))
     with pytest.raises(ChatReplyError):
         OllamaChat(Settings(), client=client).complete_json("s", "u")
+
+
+# -- runaway replies get one retry under the fixed-layout grammar (2026-11-05) ------------------
+
+RUNAWAY = '{"reasoning": "the old rule says \\"spouse\\" and "' + "\n" * 3874
+
+
+def test_whitespace_runaway_is_retried_once_with_the_fixed_layout():
+    posts: list[dict] = []
+    chat = _openai([_reply(RUNAWAY, finish="length"), _reply()], posts)
+    assert chat.complete_json("s", "u", schema=CONSOLIDATE_SCHEMA) == {"action": "new"}
+    assert "response_format" in posts[0] and "structured_outputs" not in posts[0]
+    assert "structured_outputs" in posts[1] and "response_format" not in posts[1]
+    assert posts[1]["messages"] == posts[0]["messages"] and chat.runaway_retries == 1
+    # a successful retry is a usable reply: the next call is back on the default layout
+    chat2 = _openai([_reply()], posts2 := [])
+    chat2.complete_json("s", "u", schema=CONSOLIDATE_SCHEMA)
+    assert "response_format" in posts2[0]
+
+
+def test_genuinely_long_reply_is_not_retried():
+    from qmx.chat import ChatReplyError
+
+    posts: list[dict] = []
+    long_answer = '{"reasoning": "' + "word " * 2000  # cut off mid-sentence, no whitespace run
+    chat = _openai([_reply(long_answer.rstrip(), finish="length")], posts)
+    with pytest.raises(ChatReplyError, match="cut off"):
+        chat.complete_json("s", "u", schema=CONSOLIDATE_SCHEMA)
+    assert len(posts) == 1 and chat.runaway_retries == 0
+
+
+def test_a_retry_that_runs_away_again_is_unusable():
+    from qmx.chat import ChatReplyError
+
+    posts: list[dict] = []
+    cut = _reply(RUNAWAY, finish="length")
+    chat = _openai([cut, cut], posts)
+    with pytest.raises(ChatReplyError, match="whitespace chars"):
+        chat.complete_json("s", "u", schema=CONSOLIDATE_SCHEMA)
+    assert len(posts) == 2
+
+
+def test_no_retry_when_the_fixed_layout_is_already_on():
+    from qmx.chat import ChatReplyError
+
+    posts: list[dict] = []
+    chat = _openai([_reply(RUNAWAY, finish="length")], posts, chat_json_layout="indent")
+    with pytest.raises(ChatReplyError):
+        chat.complete_json("s", "u", schema=CONSOLIDATE_SCHEMA)
+    assert len(posts) == 1
+
+
+def test_no_retry_for_a_schema_outside_the_grammar_subset():
+    from qmx.chat import ChatReplyError
+
+    posts: list[dict] = []
+    odd = {"type": "object", "properties": {"x": {"type": "string", "pattern": "a+"}},
+           "required": ["x"]}
+    with pytest.raises(ChatReplyError):
+        _openai([_reply(RUNAWAY, finish="length")], posts).complete_json("s", "u", schema=odd)
+    assert len(posts) == 1
+
+
+def test_server_rejecting_the_retry_grammar_stops_retrying():
+    from qmx.chat import ChatReplyError
+
+    posts: list[dict] = []
+    cut = _reply(RUNAWAY, finish="length")
+    chat = _openai([cut, (400, "Invalid grammar: unknown rule"), cut], posts)
+    with pytest.raises(ChatReplyError, match="rejected"):
+        chat.complete_json("s", "u", schema=CONSOLIDATE_SCHEMA)
+    with pytest.raises(ChatReplyError, match="cut off"):  # no second grammar attempt
+        chat.complete_json("s", "u", schema=CONSOLIDATE_SCHEMA)
+    assert len(posts) == 3
