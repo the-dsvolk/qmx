@@ -427,7 +427,7 @@ def store():
 
 
 def _run(store, tmp_path, decision=None, *, judge=V2, statement=OLD, detail=OLD_DETAIL,
-         cand=None, **chat_kwargs):
+         cand=None, legacy_statement=None, **chat_kwargs):
     s, embedder = store
     path = tmp_path / "sess.jsonl"
     path.write_text("\n".join(json.dumps({"type": r, "message": {"role": r, "content": t}})
@@ -436,6 +436,8 @@ def _run(store, tmp_path, decision=None, *, judge=V2, statement=OLD, detail=OLD_
     doc = s.document_id("chat", str(path.resolve()))
     target = add_learning(s, embedder, type="howto", scope=SCOPE, statement=statement,
                           detail=detail)
+    if legacy_statement is not None:  # a row saved before the one-sentence template
+        s.update_learning(target, statement=legacy_statement, revision_reason="test: legacy row")
     decisions = [{**decision, "target_id": target}] if decision else []
     chat = FakeChat(extractions=[[dict(cand or CAND)]], decisions=decisions, **chat_kwargs)
     rec = Recorder(chat)
@@ -528,7 +530,10 @@ def test_off_rule_near_duplicate_merge_is_applied_by_default(store, tmp_path):
     assert _kinds(rec) == ["extract", "decision", "dedup", "merge"]
     assert (res.offrule_flagged, res.offrule_blocked, res.dedup_merged, res.created) == (
         1, 0, 1, 0)
-    assert s.get_learning(target).statement == merged["merged_statement"]
+    # Lesson template: the merged statement keeps one sentence; the appended one leads the detail.
+    after = s.get_learning(target)
+    assert after.statement == OLD + "."
+    assert after.detail == "Store lots and trades in separate tables. " + OLD_DETAIL
 
 
 def test_claim_refusal_is_unchanged_under_v2(store, tmp_path):
@@ -544,10 +549,13 @@ def test_merge_check_gets_old_main_rule_and_the_v2_schema(store, tmp_path, caplo
     ext = {**EXTEND, "statement": two_sentences + " IRAs count too."}
     check = {**PASS_CHECK, "lost_facts": ["one entity"], "unsupported_additions": ["IRAs"]}
     with caplog.at_level(logging.WARNING, logger="qmx.consolidate"):
-        s, target, chat, rec, res = _run(store, tmp_path, ext, statement=two_sentences,
+        s, target, chat, rec, res = _run(store, tmp_path, ext, legacy_statement=two_sentences,
                                          checks=[check])
     assert res.updated == 1  # lost facts / additions are logged, not blocked
-    assert s.get_learning(target).statement == two_sentences + " IRAs count too."
+    after = s.get_learning(target)  # lesson template: one sentence, the rest leads the detail
+    assert after.statement == OLD + "."
+    assert after.detail == ("Brokers only track one account each. IRAs count too. "
+                            + EXTEND["detail"])
     [prompt] = chat.check_prompts
     assert f"OLD MAIN RULE:\n{OLD}.\n\nNEW:\n" in prompt  # the first sentence only
     [merge] = [c for c in rec.calls if _call_kind(c[0]) == "merge"]
@@ -640,9 +648,17 @@ def test_v2_cleans_judge_written_text(store, tmp_path):
 
 
 def test_current_rules_store_judge_text_verbatim(store, tmp_path):
-    new = {"reasoning": "novel", "action": "new", "statement": "[howto] Keep it as written"}
+    # v2's quote unwrapping does not apply under the current rules...
+    new = {"reasoning": "novel", "action": "new", "statement": "'Keep it as written'"}
     s, target, _, _, _ = _run(store, tmp_path, new, judge=None)
-    assert "[howto] Keep it as written" in {le.statement for le in s.list_learnings()}
+    assert "'Keep it as written'" in {le.statement for le in s.list_learnings()}
+
+
+def test_lesson_template_strips_a_leading_tag_under_every_rule_set(store, tmp_path):
+    # ...but the one-sentence lesson template (qmx.lesson_text) applies to every save.
+    new = {"reasoning": "novel", "action": "new", "statement": "[howto] Keep the tag out"}
+    s, target, _, _, _ = _run(store, tmp_path, new, judge=None)
+    assert "Keep the tag out" in {le.statement for le in s.list_learnings()}
 
 
 def test_super_wrapper_end_to_end(store, tmp_path):
