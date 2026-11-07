@@ -46,6 +46,7 @@ _ENV_MAP = {
     "QMX_JUDGE_REASONING_FIELD": "judge_reasoning_field",
     "QMX_JUDGE_FILING_RULES": "judge_filing_rules",
     "QMX_JUDGE_OFFRULE_BLOCK": "judge_offrule_block",
+    "QMX_JUDGE_LISTING": "judge_listing",
     "QMX_DEDUP_MIN_SIMILARITY": "dedup_min_similarity",
     "QMX_INJECT_GLOBAL_SHARE": "inject_global_share",
     "QMX_INJECT_RELEVANCE": "inject_relevance",
@@ -163,6 +164,13 @@ class Settings:
     # logged (the headline backstop still guards the old main rule; blocking turned good merges into
     # near-duplicates in validation). true: it is refused and the candidate stored as new.
     judge_offrule_block: bool = False
+    # How the decision call lists the existing lessons it compares the candidate with. "inline"
+    # (default): one line per lesson, "- id=N [type] (similarity ...) statement (detail)", exactly
+    # what the Qwen3.8 judge was validated with. "labelled": the code-computed main rule (first
+    # sentence), the full statement when it says more, and the detail, each on its own labelled
+    # line — the other v2 calls already get the main rule this way. Opt-in until the production
+    # judge passes the replay with it.
+    judge_listing: str = "inline"
     # One-off gate for ``qmx consolidate`` / session-end: sessions with fewer turns or characters
     # than this are skipped (and left un-consolidated so a resumed session can accumulate).
     consolidate_min_turns: int = 8

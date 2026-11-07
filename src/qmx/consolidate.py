@@ -44,7 +44,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import unicodedata
 from dataclasses import dataclass, field
 
 from qmx.chat import ChatModel, ChatReplyError
@@ -56,6 +55,16 @@ from qmx.learnings import (
     deprecate_learning,
     normalize_importance,
     reembed_learning,
+)
+from qmx.lesson_text import (  # noqa: F401  (re-exported: eval harness and tests use C.*)
+    _ABBREV,
+    _FOLD,
+    _SENT_END,
+    _TYPE_TAG,
+    _fold,
+    main_rule,
+    one_sentence,
+    strip_type_tags,
 )
 from qmx.store import Learning, Store
 
@@ -257,6 +266,11 @@ CONSOLIDATE_SCHEMA = {
 # The substrings tests/fakes.py routes on ("distill", "audit", "already in a knowledge base",
 # "proposal to RETIRE") must stay in these texts.
 FILING_RULES = ("current", "v2")
+# How the decision call lists the existing lessons (``judge_listing``): "inline" (default, one line
+# per lesson, byte-identical to what the Qwen3.8 judge was validated with) or "labelled" (one
+# labelled field per line: the code-computed main rule, the full statement when it has more than
+# that, the detail). See :func:`_describe_match_labelled`.
+LISTINGS = ("inline", "labelled")
 
 QUOTE_RULE_V2 = (
     " In every JSON text value, quote with single quotes ('like this'), never double quotes: an "
@@ -435,6 +449,8 @@ class JudgeConfig:
     reasoning_field: bool = True
     # v2 only: refuse (True) or only log (False) a merge that adds a different rule.
     offrule_block: bool = False
+    # How the decision call lists existing lessons: "inline" (default) or "labelled".
+    listing: str = "inline"
 
     @property
     def v2(self) -> bool:
@@ -505,6 +521,7 @@ def build_judge(
     reasoning_field: bool = True,
     short_max_tokens: int | None = None,
     offrule_block: bool = False,
+    listing: str = "inline",
 ) -> JudgeConfig:
     """A :class:`JudgeConfig`; ``short_max_tokens=None`` = ``SHORT_REPLY_MAX_TOKENS`` (read now).
 
@@ -515,24 +532,29 @@ def build_judge(
     if rules not in FILING_RULES:
         raise ValueError(f"judge_filing_rules must be one of {FILING_RULES}, got {filing_rules!r}")
     cap = SHORT_REPLY_MAX_TOKENS if short_max_tokens is None else int(short_max_tokens)
+    shape = (listing or "inline").strip().lower()
+    if shape not in LISTINGS:
+        raise ValueError(f"judge_listing must be one of {LISTINGS}, got {listing!r}")
     return JudgeConfig(
         prompts=judge_prompts(rules, reasoning_field),
         short_max_tokens=cap,
         filing_rules=rules,
         reasoning_field=bool(reasoning_field),
         offrule_block=bool(offrule_block),
+        listing=shape,
     )
 
 
 def judge_config(settings: Settings) -> JudgeConfig:
     """The judge the ``judge_filing_rules`` / ``judge_reasoning_field`` /
-    ``chat_short_max_tokens`` / ``judge_offrule_block`` settings select (defaults: today's judge,
-    byte for byte)."""
+    ``chat_short_max_tokens`` / ``judge_offrule_block`` / ``judge_listing`` settings select
+    (defaults: today's judge, byte for byte)."""
     return build_judge(
         settings.judge_filing_rules,
         reasoning_field=settings.judge_reasoning_field,
         short_max_tokens=settings.chat_short_max_tokens,
         offrule_block=settings.judge_offrule_block,
+        listing=settings.judge_listing,
     )
 
 
@@ -545,33 +567,13 @@ def _resolve(judge: JudgeConfig | None) -> JudgeConfig:
 # A lesson's main rule is the first sentence of its statement, computed here and used by every v2
 # prompt and check: letting the judge choose the "core claim" let clobbers through (FINDINGS 1.4),
 # and 22% of live statements have more than one sentence.
-_TYPE_TAG = re.compile(r"^\s*\[(?:howto|mistake|decision)\]\s*", re.I)
-# Abbreviations whose period does not end a sentence ("... (Model Training) vs. Multiplier ...").
-_ABBREV = re.compile(r"\b(?:e\.g|i\.e|vs|etc|approx|incl|cf|Rev|Proc|No|Inc|Fig|Sec)\.", re.I)
-_SENT_END = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9`'\"(\[])")
-_FOLD = str.maketrans(
-    {**{chr(c): "-" for c in range(0x2010, 0x2016)},  # hyphen .. horizontal bar
-     "\u2018": "'", "\u2019": "'", "\u201a": "'", "\u201b": "'",  # curly single quotes
-     "\u201c": '"', "\u201d": '"', "\u201e": '"', "\u201f": '"'}  # curly double quotes
-)
+# _TYPE_TAG, _ABBREV, _SENT_END, _FOLD, _fold and main_rule live in qmx.lesson_text (shared with
+# the one-sentence lesson template applied on every save) and are imported above.
 # A number with an optional unit: "$1,200.50", "65%", "88448GB", "3x". A merged statement may
 # correct one of these in the old first sentence and still keep its headline.
 _NUM = re.compile(r"\$?\d[\d,]*(?:\.\d+)?(?:\s?(?:%|x|k|m|gb|gib|tb|tib|mib))?", re.I)
 # An apostrophe inside a word (don't, user's) — not a quote mark.
 _APOSTROPHE = re.compile(r"(?<=\w)'(?=\w)")
-
-
-def _fold(s: str) -> str:
-    """NFKC, dash variants to '-', curly quotes to straight ones."""
-    return unicodedata.normalize("NFKC", s).translate(_FOLD)
-
-
-def main_rule(statement: str | None) -> str:
-    """A lesson's main rule: the first sentence of its statement, without a leading ``[type]``
-    tag; common abbreviations ("e.g.", "vs.", "incl.") do not end the sentence."""
-    s = _TYPE_TAG.sub("", _fold(statement or "")).strip()
-    protected = _ABBREV.sub(lambda m: m.group(0).replace(".", "\0"), s)
-    return _SENT_END.split(protected, maxsplit=1)[0].replace("\0", ".").strip()
 
 
 def _norm_v2(s: str) -> str:
@@ -783,11 +785,14 @@ def consolidate_candidate(
         if keeps:
             if j.v2:
                 _log_bloat(target_id, target.statement, statement)
+            # Lesson template: extra sentences of the merged statement lead the detail.
+            base = detail if detail is not None else target.detail
+            statement, templated = one_sentence(statement, base)
             # Only pass what the merge actually produced: in `update_learning` a ``None`` *clears*
             # the column, so an absent detail/anchors must be omitted rather than sent as None.
             patch: dict = {"statement": statement, "importance": importance}
-            if detail is not None:
-                patch["detail"] = detail
+            if detail is not None or templated != base:
+                patch["detail"] = templated
             if source_anchors:
                 patch["source_anchors"] = json.dumps(source_anchors)
             store.update_learning(target_id, **patch, revision_reason="consolidate:update")
@@ -1009,7 +1014,8 @@ def _decide(
     judge: JudgeConfig | None = None,
 ) -> dict:
     j = _resolve(judge)
-    listing = "\n".join(_describe_match(m, (sims or {}).get(m.learning_id)) for m in matches)
+    describe = _describe_match_labelled if j.listing == "labelled" else _describe_match
+    listing = "\n".join(describe(m, (sims or {}).get(m.learning_id)) for m in matches)
     user = (
         f"NEW candidate lesson:\n[{candidate['type']}] {candidate['statement']}"
         + (f"\ndetail: {candidate['detail']}" if candidate.get("detail") else "")
@@ -1186,9 +1192,12 @@ def _dedup_into(
         return True
     if j.v2:
         _log_bloat(existing.learning_id, existing.statement, stmt)
+    # Lesson template: extra sentences of the merged statement lead the detail.
+    base = detail if detail else existing.detail
+    stmt, templated = one_sentence(stmt, base)
     patch: dict = {"statement": stmt}
-    if detail:
-        patch["detail"] = detail
+    if detail or templated != base:
+        patch["detail"] = templated
     if source_anchors:
         patch["source_anchors"] = json.dumps(source_anchors)
     store.update_learning(existing.learning_id, **patch, revision_reason="consolidate:dedup-merge")
@@ -1264,21 +1273,51 @@ def _describe_match(m: Learning, sim: float | None = None) -> str:
     Similarity and provenance help the judge tell a restatement from a related-but-different lesson
     (eval: without them it re-filed existing lessons as `new`).
     """
+    line = f"- id={m.learning_id} [{m.type}] ({'; '.join(_match_meta(m, sim))}) {m.statement}"
+    if m.detail:
+        line += f" ({m.detail})"
+    if not m.is_live:
+        line += f"  [RETIRED: {_retired_why(m)}]"
+    return line
+
+
+def _match_meta(m: Learning, sim: float | None) -> list[str]:
     meta = [f"similarity {sim:.2f}"] if sim is not None else []
     meta.append(f"created {str(m.created_at)[:10]}")
     if str(m.updated_at)[:10] != str(m.created_at)[:10]:
         meta.append(f"updated {str(m.updated_at)[:10]}")
     if m.reuse_count:
         meta.append(f"recalled {m.reuse_count}x")
-    line = f"- id={m.learning_id} [{m.type}] ({'; '.join(meta)}) {m.statement}"
+    return meta
+
+
+def _retired_why(m: Learning) -> str:
+    return m.deprecated_reason or (
+        f"superseded by #{m.superseded_by}" if m.superseded_by else "retired"
+    )
+
+
+def _describe_match_labelled(m: Learning, sim: float | None = None) -> str:
+    """``judge_listing = "labelled"``: one labelled field per line instead of one long line.
+
+    ``main rule:`` is computed in code (:func:`main_rule`), as the other v2 calls already get it
+    (OLD MAIN RULE / EXISTING MAIN RULE); the judge no longer has to find the first sentence inside
+    an unlabelled line where the metadata and the detail are both in parentheses (eval 2026-11-06:
+    Nemotron 3.5 Lightning copied the detail, a later sentence or a tag-led title as the headline).
+    ``statement:`` is shown only when it says more than the main rule, so a one-sentence lesson is
+    not repeated; the detail and a retirement get their own lines.
+    """
+    rule = main_rule(m.statement)
+    lines = [f"- id={m.learning_id} [{m.type}] ({'; '.join(_match_meta(m, sim))})",
+             f"  main rule: {rule}"]
+    statement = strip_type_tags(m.statement)
+    if _norm_v2(statement) != _norm_v2(rule):
+        lines.append(f"  statement: {statement}")
     if m.detail:
-        line += f" ({m.detail})"
+        lines.append(f"  detail: {m.detail}")
     if not m.is_live:
-        why = m.deprecated_reason or (
-            f"superseded by #{m.superseded_by}" if m.superseded_by else "retired"
-        )
-        line += f"  [RETIRED: {why}]"
-    return line
+        lines.append(f"  [RETIRED: {_retired_why(m)}]")
+    return "\n".join(lines)
 
 
 def _valid_target(target_id: object, matches: list[Learning]) -> bool:

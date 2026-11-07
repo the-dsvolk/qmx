@@ -366,6 +366,13 @@ Qwen3-Coder-Next were removed from Ollama on 2026-11-05.
   2026-11-05 (`judge_filing_rules = "v2"`, `chat_short_max_tokens = 6144`). v2 becomes the code
   default only after the end-to-end blind review (Qwen non-regression) in
   `~/knowledge/qwen-judge-eval/prompt-research/PROPOSAL.md` §C.1 passes.
+- **Lesson template (always on, since 2026-11-07).** `qmx.lesson_text.one_sentence` runs on every
+  save and merge (`add_learning`, `update_learning`, the judge's `update` and near-duplicate merge):
+  the statement keeps its first sentence (same boundary as the v2 main rule), leading `[type]` tags
+  are dropped, and further sentences lead the detail unless it already holds them. Why: every v2
+  check treats the first sentence as the main rule, so a second rule in the statement was invisible
+  to it (2026-11-06: 22% of live statements had 2+ sentences; the judge missed restatements of them).
+  Revisions restore exactly; existing rows change only on their next update.
 - **Judge client settings (all off by default).** With defaults the request body is byte-identical
   to the validated Qwen3.8 request (tests pin it), so a different judge model is config only:
 
@@ -378,6 +385,7 @@ Qwen3-Coder-Next were removed from Ollama on 2026-11-05.
   | `judge_reasoning_field` (`QMX_JUDGE_REASONING_FIELD`) | `true` | reasoning-first field in all five calls (true/false, 1/0, yes/no, on/off) |
   | `judge_filing_rules` (`QMX_JUDGE_FILING_RULES`) | `"current"` | `"current"` or `"v2"` |
   | `judge_offrule_block` (`QMX_JUDGE_OFFRULE_BLOCK`) | `false` | v2 only: refuse (true) or log (false) a merge that adds a different rule |
+  | `judge_listing` (`QMX_JUDGE_LISTING`) | `"inline"` | how the decision call lists existing lessons: `"inline"` (one line each, as validated) or `"labelled"` (`main rule:` computed in code, `statement:` only when it says more, `detail:`, each on its own line). Opt-in until the production judge passes the replay with it |
 
   **Nemotron 3.5 Super profile** (experiments on the second spark; server unchanged: vLLM 0.32,
   Super NVFP4 + LiLiCorr, `--max-model-len 81920`, `nemotron_v3`). Native medium thinking
